@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+TASK_SCRIPT="$0"
+while [ -L "$TASK_SCRIPT" ]; do
+  TASK_DIR=$(CDPATH= cd -P "$(dirname "$TASK_SCRIPT")" && pwd)
+  TASK_SCRIPT=$(readlink "$TASK_SCRIPT")
+  case "$TASK_SCRIPT" in /*) ;; *) TASK_SCRIPT="$TASK_DIR/$TASK_SCRIPT" ;; esac
+done
+TASK_ROOT=$(CDPATH= cd "$(dirname "$TASK_SCRIPT")/../../.." && pwd)
+exec "$TASK_ROOT/bin/desk-tidy" "$@"

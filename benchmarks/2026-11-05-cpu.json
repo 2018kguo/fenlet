@@ -1,0 +1,44 @@
+{
+  "synthetic": true,
+  "python": "3.14.3",
+  "architecture": "arm64",
+  "measurement": "median process CPU milliseconds over five runs",
+  "results": [
+    {
+      "windows": 16,
+      "plan_ms": 0.058,
+      "dense_overlap_ms": 0.033,
+      "disjoint_overlap_ms": 0.027,
+      "exact_dense_pairs": 120,
+      "diagnostic_pairs": 32,
+      "visible_panes": 16
+    },
+    {
+      "windows": 128,
+      "plan_ms": 0.248,
+      "dense_overlap_ms": 0.201,
+      "disjoint_overlap_ms": 0.204,
+      "exact_dense_pairs": 8128,
+      "diagnostic_pairs": 32,
+      "visible_panes": 20
+    },
+    {
+      "windows": 1024,
+      "plan_ms": 1.823,
+      "dense_overlap_ms": 1.601,
+      "disjoint_overlap_ms": 1.653,
+      "exact_dense_pairs": 523776,
+      "diagnostic_pairs": 32,
+      "visible_panes": 20
+    },
+    {
+      "windows": 8192,
+      "plan_ms": 14.939,
+      "dense_overlap_ms": 15.377,
+      "disjoint_overlap_ms": 13.322,
+      "exact_dense_pairs": 33550336,
+      "diagnostic_pairs": 32,
+      "visible_panes": 20
+    }
+  ]
+}

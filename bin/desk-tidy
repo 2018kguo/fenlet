@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+TASK_SCRIPT="$0"
+while [ -L "$TASK_SCRIPT" ]; do
+  TASK_DIR=$(CDPATH= cd -P "$(dirname "$TASK_SCRIPT")" && pwd)
+  TASK_SCRIPT=$(readlink "$TASK_SCRIPT")
+  case "$TASK_SCRIPT" in /*) ;; *) TASK_SCRIPT="$TASK_DIR/$TASK_SCRIPT" ;; esac
+done
+TASK_DIR=$(CDPATH= cd -P "$(dirname "$TASK_SCRIPT")" && pwd)
+if [ -d "$TASK_DIR/../Resources/desk_tidy" ]; then
+  TASK_ROOT=$(CDPATH= cd "$TASK_DIR/../Resources" && pwd)
+else
+  TASK_ROOT=$(CDPATH= cd "$TASK_DIR/.." && pwd)
+fi
+if [ -x "$TASK_ROOT/runtime/bin/python3" ]; then
+  TASK_PYTHON="$TASK_ROOT/runtime/bin/python3"
+else
+  TASK_PYTHON=$(command -v python3 || true)
+  [ -n "$TASK_PYTHON" ] || { printf '%s\n' 'Download the Desk Tidy app, which includes its runtime.' >&2; exit 1; }
+fi
+if [ -f /etc/ssl/cert.pem ] && [ -z "${SSL_CERT_FILE:-}" ]; then export SSL_CERT_FILE=/etc/ssl/cert.pem; fi
+exec "$TASK_PYTHON" -I -B -c 'import runpy,sys; sys.path.insert(0,sys.argv.pop(1)); runpy.run_module("desk_tidy",run_name="__main__")' "$TASK_ROOT" "$@"
