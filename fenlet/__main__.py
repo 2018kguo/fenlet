@@ -4,6 +4,7 @@ import sys
 import time
 import getpass
 import subprocess
+from . import __version__
 from .core import DEFAULT_INTENT, eligible_windows, snap_frame, screen_key, screen_for_window
 from .operations import apply, read_plan, save_plan, summary, undo, audit_layout, revise_plan
 from .runtime import decide, inventory, load_env, doctor, save_provider_key, install_cli, install_skill, run_json, native
@@ -11,6 +12,7 @@ from .runtime import decide, inventory, load_env, doctor, save_provider_key, ins
 
 def main():
     parser = argparse.ArgumentParser(prog="fenlet", description="Arrange your Mac windows into useful panes.")
+    parser.add_argument("--version", action="version", version=f"fenlet {__version__}")
     parser.add_argument("--env-file", help="Explicit KEY=value file; never saved or uploaded")
     parser.add_argument("--json", action="store_true", help="Machine-readable output")
     sub = parser.add_subparsers(dest="command", required=True)

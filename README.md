@@ -1,102 +1,131 @@
-# Fenlet
+<p align="center"><img src="assets/fenlet.svg" width="56" height="56" alt=""></p>
+<h1 align="center">Fenlet</h1>
+<p align="center">A little room to think. Arrange your Mac windows, then get back to work.</p>
+<p align="center">
+  <a href="#get-started">Get started</a> ·
+  <a href="#with-an-agent">For agents</a> ·
+  <a href="docs/reference.md">CLI reference</a> ·
+  <a href="docs/operating.md">Setup & privacy</a>
+</p>
 
-A native macOS menu-bar widget, CLI, and agent skill for any connected display setup.
+Fenlet turns the windows you are using into non-overlapping panes. Keep a
+browser beside your terminal, put chat on another screen, and set aside the
+rest. It adapts to a laptop alone, several displays, and portrait monitors.
 
-Click **Arrange windows** for a quick draft, drag tiles to adjust it, then **Confirm arrangement**. Your desktop changes only after confirmation. Useful foreground windows become non-overlapping panes. Useful background windows minimize; idle clutter closes through the normal macOS Close button.
+A small native widget, a CLI, and an agent skill share the same planner.
+Click **Arrange windows**, adjust the draft by dragging tiles, then
+**Confirm arrangement**. Nothing moves or closes before confirmation.
 
-One screen gets a full-width preview; multiple screens share a scrollable grid with real window thumbnails. Instructions and the confirmation button stay visible. Hover a window for a closer look. A short, one-time wiggle, grab dots, and a grab cursor identify editable tiles; the motion respects Reduce Motion. Drag onto another tile to swap occupants, or onto an empty display to move and reflow. Windows marked **To minimize** or **To close** remain visible as thumbnails below the displays. Drag one back to a display to keep it visible, or drop an active tile into those areas to change its role. Right-click any draft tile for placement choices too. Nothing moves, minimizes, or closes until confirmation. Draft edits use the local planner without model calls or desktop changes. Display assignments for Work, Chat, and References are in Settings, with Automatic as the default.
+<p align="center"><img src="docs/demo.gif" width="420" alt="Fenlet's native widget: drag a background music window onto the laptop display before confirming."></p>
+<p align="center"><sub>Demo uses synthetic windows and example content. Real window images stay on your Mac.</sub></p>
 
-Preview images show current window content fitted into proposed panes; apps reflow their content when the arrangement is applied.
+## Get started
 
-## Install
+**[Download Fenlet for Apple Silicon](https://github.com/2018kguo/fenlet/releases/latest/download/Fenlet-macos-arm64.zip)** ·
+[Releases & checksums](https://github.com/2018kguo/fenlet/releases)
 
-Requires Apple Silicon and macOS 13+. The built app includes Python and its native window helper. End users need no Homebrew, Python installation, browser automation, or developer tools.
+Unzip it, move **Fenlet.app** into Applications, and open it. Setup guides you
+through Accessibility permission, your provider key, and optional window
+previews. Choose **Install CLI & skill** in Settings for terminal and agent use.
 
-For a prebuilt ZIP, unzip it, move Fenlet.app into Applications, and open it. Setup handles permission and key entry; “Install CLI & skill” enables Terminal and Codex.
+macOS 13+; real window thumbnails need macOS 14+ and Screen Recording permission.
+The app includes its runtime. No Homebrew, Python install, browser extension,
+or background server is needed.
 
-For a source build:
+This first public preview is **Developer ID signed, not notarized**. macOS may
+ask you to approve the app in Privacy & Security. See [first-launch instructions](docs/operating.md#first-launch).
+
+To build from source:
 
 ```sh
+git clone https://github.com/2018kguo/fenlet.git
+cd fenlet
 bash scripts/install.sh
 open "$HOME/Applications/Fenlet.app"
 ```
 
-The source installer opens Apple's Command Line Tools installer when needed and downloads a standalone Python runtime through [uv](https://docs.astral.sh/uv/). Run it again after Apple's installer finishes. The installed app and CLI work independently of this checkout.
+The source build needs Apple's Command Line Tools; the installer opens Apple's
+setup when they are missing. The [development guide](docs/development.md)
+covers builds, verification, and releases.
 
-Open the menu-bar icon. Setup guides you through macOS Accessibility permission and a provider API key, saved in Keychain. Vercel AI Gateway supports all model options; OpenRouter supports Nemotron and Beam. The widget can install the CLI into `~/.local/bin` and the included agent skill into `~/.codex/skills`. The source installer also links the skill into `~/.codex/skills/fenlet`; other agents can use the included skill directory.
+## Make it yours
 
-Build a distributable ZIP with `bash scripts/package.sh`. Local builds are ad-hoc signed. A public release still needs Developer ID signing and notarization; no public release is published by this repository's build scripts.
+- **Tall, readable panes.** Tight 6-point gaps, native app minimums, and
+  physical display dimensions guide placement. Text panes favor 6–8 inches
+  of width when space permits; narrow portrait screens use their height.
+- **Review the whole workspace.** Work, chat, and reference displays can be
+  Automatic or selected in Settings. Windows marked **To minimize** or
+  **To close** remain visible in the draft. Drag one back to keep it on screen.
+- **Keep your choices.** Already fitting tiles retain their order. Repeat
+  previews reuse confirmed placements while the windows, positions, and
+  instructions still match.
+- **A quiet menu-bar app.** Live thumbnails refresh while it is open and stop
+  when it closes. Drag edits run locally, without a model call. Window
+  arrangement uses native batched operations without activating or raising apps.
 
-## Panes, not guessed coordinates
-
-Models select a connected display, minimize, close, or leave unchanged. The widget lists actual display names and scrolls when more displays are connected. Automatic uses the largest display for work, another display for chat when available, and a third for references when available. All groups share panes when only one display is connected. Saved display UUIDs fall back to Automatic when unplugged. Code partitions usable screen rectangles, reserves menu-bar/Dock space, applies 6-point gaps, favors tall columns, and respects exposed minimum sizes. OS-reported physical dimensions favor 6–8 inch text panes (7 inches ideal), including portrait layouts that use vertical space. Missing or estimated dimensions use point-based sizing; native minimum sizes and available space take priority. When panes cannot fit, lower-priority windows minimize. The focused window stays open. Arrangement never activates or raises apps. Video-app and video-title hints favor wider panes; these hints do not establish playback state.
-
-Related work browsers and terminals stay adjacent within their chosen display. Explicitly unchanged windows are fixed obstacles. Some apps omit their minimum size. A confirmed resize clamp triggers one new partition using the measured dimensions. Failed closes and newly opened windows become fixed obstacles in a bounded geometric repair. Actual OS rectangles are checked afterward. `fenlet check` reports the exact overlap count and up to 32 examples; a partial run does not mean the desktop is clean.
-
-Opening a draft keeps windows in their current slots when they already fit the chosen layout, including a manually reordered layout. A new display assignment, overlapping windows, or changed screen geometry still triggers a new partition. Grab handles use reserved header space so entering edit mode does not squeeze or shift tile captions.
-
-Repeat previews reuse placements from the last confirmed arrangement while window identities, positions, and instructions still match. This keeps a cached model classification from minimizing a window you chose to keep visible. New windows are classified normally; moved or replaced windows and changed instructions are evaluated afresh. The shared engine records the confirmed journal pointer for both CLI and widget runs.
-
-The engine operates on visible windows in the current Spaces. It leaves fullscreen/other-Space windows, protected dialogs, unsaved work, and unrelated browser-test windows alone. It never force-quits an app or clicks Discard. A normal close cannot always be undone; “Undo” restores moves/minimizes and keeps later manual changes intact.
-
-## CLI
+## From the terminal
 
 ```sh
-fenlet setup
-fenlet doctor
-fenlet scan
-fenlet arrange --yes       # classify and arrange in one run
-fenlet plan "Work on my big screen; chat on my laptop" --model jev
+fenlet plan "Browser beside my terminal. Chat on another screen."  # review first
 fenlet apply PLAN_PATH --yes
-fenlet edit PLAN_PATH --swap WINDOW_ID OTHER_WINDOW_ID
-fenlet edit PLAN_PATH --move WINDOW_ID DISPLAY_UUID
-# Also: edit PLAN_PATH --minimize WINDOW_ID / --close WINDOW_ID
-fenlet check
-# Optional: plan --work-display DISPLAY_UUID --chat-display DISPLAY_UUID
-
-fenlet snap left        # focused window: left/right/top/bottom/full
-fenlet tile             # offline pane preview
-fenlet tile --yes       # apply offline panes on each current display
-
+fenlet arrange --yes       # plan and apply in one run
 fenlet undo JOURNAL_PATH
+
+fenlet tile                # offline pane preview
+fenlet snap left           # focused window, no model
+fenlet check               # actual OS overlap report
 ```
 
-Commands return JSON, also accepted explicitly with `--json`. `arrange --yes` authorizes ordinary moves, minimizes and normal closes; omit `--yes` for an interactive confirmation. An authorized agent can also review a separate plan and apply it. Environment keys (`AI_GATEWAY_API_KEY`, `OPENROUTER_API_KEY`) and an explicit `--env-file PATH` are supported. No automatic credential discovery.
+Commands return JSON. The CLI can also edit saved drafts, choose displays,
+check setup, and install the skill. See the [CLI reference](docs/reference.md).
 
-Plans expire after 15 minutes and apply once. Changes made after a preview are preserved. Operations use process-start identity plus window ID, a write-ahead journal, native batched app control, and observed results. Only reads retry automatically; uncertain mutations are inspected before any further action. Undo preserves subsequent manual changes and never overwrites files.
+## With an agent
+
+Install the bundled skill from Settings, or use the public skill directory:
+
+```sh
+npx skills add 2018kguo/fenlet --skill fenlet
+```
+
+Then ask:
+
+> Use Fenlet to tile my current work without overlaps. Keep the browser beside
+> my terminal, chat on another display if there is one, and minimize useful
+> background windows. Close idle clutter.
+
+The skill uses the same CLI and verified operation journal as the widget.
+The [skill instructions](skills/fenlet/SKILL.md) explain preview, confirmation,
+background windows, and Undo.
 
 ## Models and privacy
 
-Jev 1.14 is the default: one batch of short, concrete per-window questions. **Jev + Nemotron** spends a second request on uncertain classifications; its threshold controls spending. Nemotron and Beam are available directly. Geometry and permission to act never come from model confidence.
+**Jev 1.14** is the fast default. Optional Nemotron, Beam, and a Jev-to-Nemotron
+escalation mode are available. Models classify window purpose; local code
+owns geometry and every OS action. Confirmed layouts and identical recent
+requests avoid unnecessary model calls.
 
-The [synthetic benchmark](benchmarks/2026-11-05-synthetic.json) is a small repeatable smoke benchmark, not a general accuracy claim. Reproduce it with your provider:
+App names, window titles, and your instructions go to your chosen provider.
+Screenshots and document contents do not. Keys stay in Keychain. Fenlet does
+not scan or modify Desktop files. There is no telemetry or background model loop.
 
-```sh
-export AI_GATEWAY_API_KEY='…'
-python3 scripts/benchmark.py --repeats 2
-```
+[Setup, privacy, and limitations](docs/operating.md) ·
+[Small synthetic model benchmark](benchmarks/2026-11-05-synthetic.json) ·
+[CPU benchmark](benchmarks/2026-11-05-cpu.json)
 
-Layout requests send app names, window titles, and your instructions to the chosen provider. Window images stay local. Fenlet only organizes windows; it does not scan or modify Desktop files. There are no background model calls. Private plans/journals live in `~/.local/state/fenlet`; settings live in `~/.config/fenlet`.
+## Development
 
-Window thumbnails use ScreenCaptureKit on macOS 14+ and optional Screen Recording permission. Use “Allow…” below the preview if permission is missing. Arrangement still works without it. Captures stay in widget memory, never go to the provider, and are never saved to disk. While the widget is open, window positions and images refresh about once a second. Closing it stops refreshes. These updates make no model calls and never scan Desktop files. A budget of 24 small images limits memory; inspecting a window prioritizes it. A desktop geometry change invalidates an old proposed layout. Captures never block the CLI or arrangement.
-
-Identical classification inputs reuse a private result for up to 60 seconds. Changes to titles, focus, process identities, instructions, display preferences or model invalidate it. Geometry and permission to act are checked fresh every time. Fenlet never enumerates Desktop files.
-
-[agent-browser](https://github.com/vercel-labs/agent-browser) operates inside browser pages. Fenlet uses native Accessibility and CoreGraphics APIs for desktop arrangement, avoiding a screenshot-driven browser-agent loop.
-
-## Develop
+SwiftUI/AppKit for the widget; Python's standard library for layout; Swift
+Accessibility and CoreGraphics for OS control. No Electron or Python packages.
 
 ```sh
 python3 -m unittest discover -v
-python3 scripts/benchmark-cpu.py
-python3 scripts/verify-native.py
 bash scripts/build-app.sh
+python3 scripts/verify-bundle.py build/Fenlet.app
 ```
 
-SwiftUI/AppKit widget; Python standard-library planner; Swift discovery and OS control. No Electron, web server, or Python packages. One short-lived native connection serves each CLI invocation; app window indexes are read once per batch, and already correct panes skip AX enumeration and setters. Undo batches restores and waits for Dock restore animation to finish before verifying.
+CI runs the planner tests on Linux and builds and smoke-tests the portable app
+on macOS. Native window and GUI checks use disposable fixtures on a local Mac;
+they require desktop permissions and are separate from hosted CI.
+[Development, demo reproduction, and releases](docs/development.md).
 
-Overlap checking uses an O(N log N) sweep with O(N) memory and capped examples, including dense stacks. Pane search is bounded by the screen's physical capacity and window minimums, rather than trying every subset of N windows. The [CPU benchmark](benchmarks/2026-11-05-cpu.json) measures planning and exact overlap counting separately from OS and provider latency. `verify-native.py` creates disposable windows, checks moves, minimize/Undo, real Close, unsaved-state and stale-identity guards, then removes only its own fixture. It never arranges other apps.
-
-`--show` opens the normal menu-bar popover once; `--preview-window` is a development view. `python3 scripts/verify-widget.py` renders synthetic one-, two-, four- and six-display drafts and checks that controls stay visible (requires Peekaboo for the UI checks).
-
-MIT licensed.
+[MIT](LICENSE) · [Bundled runtime notices](THIRD_PARTY_NOTICES.md)

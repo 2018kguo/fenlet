@@ -19,22 +19,25 @@ rm -rf "$TASK_APP/Contents/Resources/runtime"
 mkdir -p "$TASK_APP/Contents/Resources/runtime"
 cp -cR "$TASK_RUNTIME/." "$TASK_APP/Contents/Resources/runtime/"
 find "$TASK_APP/Contents/Resources/fenlet" -name __pycache__ -type d -exec rm -rf {} +
-cat > "$TASK_APP/Contents/Info.plist" <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-<key>CFBundleExecutable</key><string>Fenlet</string>
-<key>CFBundleIdentifier</key><string>org.2018kguo.desk-tidy</string>
-<key>CFBundleName</key><string>Fenlet</string>
-<key>CFBundleIconFile</key><string>AppIcon</string>
-<key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.2.0</string>
-<key>CFBundleVersion</key><string>2</string>
-<key>LSMinimumSystemVersion</key><string>13.0</string>
-<key>LSUIElement</key><true/>
-<key>NSHighResolutionCapable</key><true/>
-</dict></plist>
-PLIST
+cp "$TASK_ROOT/LICENSE" "$TASK_APP/Contents/Resources/LICENSE.txt"
+cp "$TASK_ROOT/THIRD_PARTY_NOTICES.md" "$TASK_APP/Contents/Resources/THIRD_PARTY_NOTICES.md"
+cp -R "$TASK_ROOT/vendor/python-licenses" "$TASK_APP/Contents/Resources/"
+"$TASK_RUNTIME/bin/python3" - "$TASK_ROOT" "$TASK_APP" <<'PYPLIST'
+import plistlib
+from pathlib import Path
+import sys
+sys.path.insert(0, sys.argv[1])
+from fenlet import __version__
+info = {
+    "CFBundleExecutable": "Fenlet", "CFBundleIdentifier": "org.2018kguo.desk-tidy",
+    "CFBundleName": "Fenlet", "CFBundleIconFile": "AppIcon", "CFBundlePackageType": "APPL",
+    "CFBundleShortVersionString": __version__, "CFBundleVersion": __version__,
+    "LSMinimumSystemVersion": "13.0", "LSUIElement": True, "NSHighResolutionCapable": True,
+    "LSApplicationCategoryType": "public.app-category.productivity",
+}
+with (Path(sys.argv[2]) / "Contents/Info.plist").open("wb") as output:
+    plistlib.dump(info, output)
+PYPLIST
 test -x "$TASK_APP/Contents/MacOS/Fenlet"
 codesign --force --sign - "$TASK_APP"
 printf '%s\n' "$TASK_APP"

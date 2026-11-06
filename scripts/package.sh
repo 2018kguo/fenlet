@@ -10,5 +10,5 @@ fi
 codesign --verify --deep --strict "$TASK_APP"
 TASK_ZIP="$TASK_ROOT/build/Fenlet-macos-$(uname -m).zip"
 ditto -c -k --sequesterRsrc --keepParent "$TASK_APP" "$TASK_ZIP"
-shasum -a 256 "$TASK_ZIP" > "$TASK_ZIP.sha256"
+(cd "$(dirname "$TASK_ZIP")" && shasum -a 256 "$(basename "$TASK_ZIP")" > "$(basename "$TASK_ZIP").sha256")
 printf '%s\n' "$TASK_ZIP"

@@ -17,6 +17,12 @@ sys.path.insert(0, str(ROOT))
 from fenlet.core import build_actions
 
 
+def build_fixture(executable):
+    subprocess.run(["xcrun", "swiftc", "-O", "-D", "FENLET_UI_TEST", "-parse-as-library",
+                    *[str(ROOT / "native" / file) for file in ("MenuBar.swift", "WindowPreviews.swift", "DraftEditing.swift", "Brand.swift", "DemoWindows.swift", "WidgetFixture.swift")],
+                    "-o", str(executable), "-framework", "SwiftUI", "-framework", "Security", "-framework", "ScreenCaptureKit"], check=True)
+
+
 def snapshot(window):
     result = subprocess.run(["peekaboo", "see", "--window-id", str(window), "--tree", "--no-screenshot", "--json"], capture_output=True, text=True)
     response = json.loads(result.stdout)
@@ -64,11 +70,20 @@ def fixture(count, allow_portrait=True, mode="tiles"):
                 action_count=len(actions), model=None, coverage=dict(errors=[]))
 
 
-def drag(data, source, target):
-    receipt = subprocess.run(["peekaboo", "drag", "--from", source["id"], "--to", target["id"],
-                              "--snapshot", data["snapshot_id"], "--duration", "400ms", "--steps", "20", "--json"], capture_output=True, text=True)
-    response = json.loads(receipt.stdout)
-    assert response.get("success"), response.get("error")
+def drag(window, data, source, target):
+    for attempt in range(2):
+        receipt = subprocess.run(["peekaboo", "drag", "--from", source["id"], "--to", target["id"],
+                                  "--snapshot", data["snapshot_id"], "--duration", "400ms", "--steps", "20", "--json"], capture_output=True, text=True)
+        response = json.loads(receipt.stdout)
+        if response.get("success"): return
+        error = response.get("error", {})
+        # A tooltip can change window inventory between observation and delivery.
+        # Re-observe only when Peekaboo proves no gesture was dispatched.
+        if attempt or error.get("code") != "SNAPSHOT_STALE" or error.get("mutation_dispatched") is not False:
+            raise AssertionError(error)
+        data = snapshot(window)
+        source = next(e for e in data["ui_elements"] if e.get("label") == source["label"])
+        target = next(e for e in data["ui_elements"] if e.get("label") == target["label"])
 
 
 def restore_background_window(window, directory, data, before):
@@ -84,7 +99,7 @@ def restore_background_window(window, directory, data, before):
         source = next(e for e in data["ui_elements"] if e.get("label") == source_label)
         target = next(e for e in data["ui_elements"] if e.get("label") == target_label)
         existing = set((directory / "state/plans").glob("*.json"))
-        drag(data, source, target)
+        drag(window, data, source, target)
         deadline = time.monotonic() + 4
         while True:
             data = snapshot(window)
@@ -135,9 +150,7 @@ def main():
         executable = directory / "FenletWidgetFixture"
         (directory / "bin").mkdir()
         (directory / "bin/fenlet").symlink_to(ROOT / "bin/fenlet")
-        subprocess.run(["xcrun", "swiftc", "-O", "-D", "FENLET_UI_TEST", "-parse-as-library",
-                        *[str(ROOT / "native" / file) for file in ("MenuBar.swift", "WindowPreviews.swift", "DraftEditing.swift", "Brand.swift", "WidgetFixture.swift")],
-                        "-o", str(executable), "-framework", "SwiftUI", "-framework", "Security", "-framework", "ScreenCaptureKit"], check=True)
+        build_fixture(executable)
         cases = [(count, True, "tiles") for count in args.counts]
         if 2 in args.counts: cases += [(2, False, "tiles"), (2, False, "background")]
         for count, allow_portrait, mode in cases:
@@ -167,7 +180,7 @@ def main():
                 if count == 1:
                     source = next(e for e in data["ui_elements"] if e.get("label") == "Preview Terminal: Example 1")
                     target = next(e for e in data["ui_elements"] if e.get("label") == "Preview Safari: Example 2")
-                    drag(data, source, target)
+                    drag(window, data, source, target)
                     deadline = time.monotonic() + 3
                     while True:
                         data = snapshot(window)

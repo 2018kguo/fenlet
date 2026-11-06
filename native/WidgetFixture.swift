@@ -12,9 +12,14 @@ import SwiftUI
         store.journal = nil
         store.liveInventory = preview.plan.inventory
         store.preview = preview; store.hasLayout = true; store.liveReadOK = true
+        let demo = CommandLine.arguments.contains("--demo")
+        if demo {
+            store.windowPreviews.loadDemo(preview.plan.inventory.windows)
+            store.status = "Nothing moves or closes until you confirm."
+        }
         store.settings.customInstructions = "Keep my browser beside my terminal. Put chat on another display when there is room."
         let window = NSWindow(contentRect: NSRect(x: 100, y: 180, width: 420, height: store.panelHeight), styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        window.title = "Fenlet layout verification"
+        window.title = demo ? "Fenlet" : "Fenlet layout verification"
         window.contentView = NSHostingView(rootView: Panel(store: store))
         window.isReleasedWhenClosed = false; window.orderFrontRegardless()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {

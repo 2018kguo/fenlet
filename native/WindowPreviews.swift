@@ -79,6 +79,16 @@ import SwiftUI
     private var requestedIdentities: [String] = []
     private var priorityIDs: [String] = []
 
+    #if FENLET_UI_TEST
+    private var fixtureMode = false
+    func loadDemo(_ windows: [WindowInfo]) {
+        fixtureMode = true; allowed = true
+        thumbnails = Dictionary(uniqueKeysWithValues: windows.map { window in
+            (window.id, Thumbnail(identity: Self.identity(window), image: DemoWindows.image(for: window)))
+        })
+    }
+    #endif
+
     nonisolated static func identity(_ window: WindowInfo) -> String {
         "\(window.pid)/\(window.process_instance)/\(window.id)"
     }
@@ -99,6 +109,9 @@ import SwiftUI
         refresh(windows, maxAge: 0)
     }
     func refresh(_ windows: [WindowInfo], maxAge: TimeInterval = 5) {
+        #if FENLET_UI_TEST
+        if fixtureMode { return }
+        #endif
         allowed = CGPreflightScreenCaptureAccess()
         guard allowed, supported else {
             generation += 1; refreshTask?.cancel(); loading = false; thumbnails = [:]; return
