@@ -60,7 +60,7 @@ struct PreviewInfo: Decodable {
     let model: ModelInfo?
     let coverage: CoverageInfo
     func showing(_ check: ApplyInfo.LayoutCheck) -> PreviewInfo {
-        let inventory = InventoryInfo(displays: check.displays, windows: check.windows)
+        let inventory = check.inventory
         return PreviewInfo(plan_path: plan_path, plan: PlanInfo(inventory: inventory, actions: []), window_count: check.windows.count,
             action_count: 0, model: model, coverage: coverage)
     }
@@ -68,7 +68,14 @@ struct PreviewInfo: Decodable {
 struct Envelope<T: Decodable>: Decodable { let ok: Bool; let data: T?; let error: String? }
 struct ApplyInfo: Decodable {
     struct Change: Decodable { let ok: Bool; let error: String? }
-    struct LayoutCheck: Decodable { let overlap_count: Int; let windows: [WindowInfo]; let displays: [ScreenInfo] }
+    struct LayoutCheck: Decodable {
+        let overlap_count: Int
+        let windows: [WindowInfo]
+        let displays: [ScreenInfo]
+        var inventory: InventoryInfo {
+            InventoryInfo(displays: displays, windows: windows, all_spaces: displays.contains { $0.gather_space != nil })
+        }
+    }
     let journal_path: String
     let succeeded, failed, planned, apply_ms, closed, arranged, minimized: Int
     let undoable: Bool
@@ -85,12 +92,7 @@ struct Settings: Codable {
     var model = "jev"
     var provider = "gateway"
     var envFile: String? = nil
-    var workScreen: String?
-    var chatScreen: String?
-    var referenceScreen: String?
     var customInstructions: String?
-    var allSpaces: Bool?
-    var gatherScreen: String?
     var skipWindowPreviews: Bool?
 }
 
@@ -188,14 +190,7 @@ enum TidyError: LocalizedError {
                         let data = try await Self.command(self.scanArguments, settings: self.settings, workFocus: self.workFocus)
                         let response = try JSONDecoder().decode(Envelope<InventoryInfo>.self, from: data)
                         if !Task.isCancelled, !self.busy, !self.editingDraft, revision == self.desktopRevision, response.ok, let inventory = response.data {
-                            self.liveReadOK = true
-                            if self.hasLayout, let planned = self.preview?.plan.inventory, !Self.sameLayout(planned, inventory) {
-                                self.hasLayout = false
-                                self.status = "Windows changed. Refresh your layout to continue."
-                            }
-                            self.liveInventory = inventory
-                            self.windowPeek.update(inventory.windows, captures: self.windowPreviews)
-                            self.windowPreviews.refresh(inventory.windows, maxAge: 0.9)
+                            self.observeInventory(inventory)
                         } else if !Task.isCancelled { self.liveReadOK = false }
                     } catch { if !Task.isCancelled { self.liveReadOK = false } }
                 } else if self.onboarding || self.showingSettings {
@@ -210,6 +205,17 @@ enum TidyError: LocalizedError {
         liveReadOK = false
         if CommandLine.arguments.contains("--diagnose") { fputs("live preview: stopped\n", stderr) }
     }
+    func observeInventory(_ inventory: InventoryInfo) {
+        let displaysChanged = liveInventory.map { $0.displays != inventory.displays } ?? false
+        if displaysChanged { error = nil; status = "Display setup updated. Ready to arrange." }
+        if hasLayout, let planned = preview?.plan.inventory, !Self.sameLayout(planned, inventory) {
+            hasLayout = false
+            status = displaysChanged ? "Display setup updated. Ready to arrange." : "Windows changed. Arrange again when you’re ready."
+        }
+        liveReadOK = true; liveInventory = inventory
+        windowPeek.update(inventory.windows, captures: windowPreviews)
+        windowPreviews.refresh(inventory.windows, maxAge: 0.9)
+    }
     static func sameLayout(_ planned: InventoryInfo, _ live: InventoryInfo) -> Bool {
         guard planned.displays == live.displays, planned.windows.count == live.windows.count else { return false }
         let actual = Dictionary(uniqueKeysWithValues: live.windows.map { ($0.id, $0) })
@@ -219,7 +225,7 @@ enum TidyError: LocalizedError {
         }
     }
     var layoutRequest: String {
-        "Tile current work, chat and useful references using the supplied display preferences. "
+        "Tile current work on the best work display. Put chat and useful references on other displays when there is room. "
         + "Minimize useful background windows. Close idle clutter. Keep the focused window open. "
         + "When coding, place the related work browser beside the active terminal; keep communication separate. "
         + "Additional user preferences take priority: \(settings.customInstructions ?? "")"
@@ -229,11 +235,10 @@ enum TidyError: LocalizedError {
         guard let screens = inventory?.displays, !screens.isEmpty else { return 550 }
         let gallery: CGFloat = screens.count == 1 || screens.count > 2 ? 255
             : screens.contains(where: { $0.bounds.height > $0.bounds.width }) ? 231 : 193
-        return 330 + gallery + (draft ? 104 : 0)
+        return 296 + gallery + (draft ? 104 : 0)
     }
     var panelHeight: CGFloat { onboarding || showingSettings ? 650 : Self.panelHeight(for: liveInventory, draft: hasLayout) }
     func claimDraftIntroduction(_ id: String) -> Bool { introducedWindows.insert(id).inserted }
-    var hasStalePreview: Bool { !hasLayout && preview?.plan.actions.isEmpty == false }
     var hasDraft: Bool { preview?.plan.actions.isEmpty == false }
     func cancelPreview() { desktopRevision += 1; hasLayout = false; preview = nil; draggedWindowID = nil; draftCursor.position = nil; draftTarget = nil; editingDraft = false; status = "Ready to arrange." }
     func target(at point: CGPoint) -> DraftTarget.Kind? {
@@ -268,27 +273,7 @@ enum TidyError: LocalizedError {
         case .disposition(let kind): editDraft(["--" + kind, id])
         }
     }
-    var scopeArguments: [String] { settings.allSpaces == true ? ["--all-spaces"] : [] }
-    var scanArguments: [String] { ["scan"] + scopeArguments }
-    var allSpaces: Binding<Bool> {
-        Binding(get: { self.settings.allSpaces == true }, set: { value in
-            guard self.settings.allSpaces != value else { return }
-            self.settings.allSpaces = value
-            self.cancelPreview()
-            do { try self.persist() } catch { self.error = error.localizedDescription }
-            self.scan(layout: false)
-        })
-    }
-    func destination(_ key: WritableKeyPath<Settings, String?>) -> Binding<String> {
-        Binding(get: {
-            guard let selected = self.settings[keyPath: key], self.availableDisplays.contains(where: { $0.id == selected }) else { return "auto" }
-            return selected
-        }, set: {
-            guard self.settings[keyPath: key] != $0 else { return }
-            self.settings[keyPath: key] = $0; self.desktopRevision += 1; self.hasLayout = false
-            do { try self.persist() } catch { self.error = error.localizedDescription }
-        })
-    }
+    var scanArguments: [String] { ["scan", "--all-spaces"] }
     var customInstructions: Binding<String> {
         Binding(get: { self.settings.customInstructions ?? "" }, set: {
             guard (self.settings.customInstructions ?? "") != $0 else { return }
@@ -416,24 +401,21 @@ enum TidyError: LocalizedError {
                 }
                 liveInventory = inventory; liveReadOK = true
                 if liveTask != nil { windowPreviews.refresh(inventory.windows) }
-                status = layout ? (settings.allSpaces == true && inventory.windows.contains { $0.fullscreen == true }
+                status = layout ? (inventory.windows.contains { $0.fullscreen == true }
                     ? "Fullscreen windows will leave fullscreen when you confirm." : "Nothing moves or closes until you confirm.") : "Ready to arrange."
                 if layout, preview?.coverage.errors.isEmpty == false { status += " Some windows couldn't be inspected." }
-            } catch { self.error = error.localizedDescription; status = "Try refreshing your preview." }
+            } catch { self.error = error.localizedDescription; status = "Arrange again when you’re ready." }
         }
     }
     func layoutArguments(_ command: String) -> [String] {
-        let gather = settings.allSpaces == true ? availableDisplays.first { $0.id == settings.gatherScreen } : nil
-        return [command, layoutRequest, "--model", settings.model, "--provider", settings.provider,
-         "--work-display", settings.workScreen ?? "auto", "--chat-display", settings.chatScreen ?? "auto", "--reference-display", settings.referenceScreen ?? "auto"] + scopeArguments
-            + (gather.map { ["--display", $0.id] } ?? [])
+        [command, layoutRequest, "--model", settings.model, "--provider", settings.provider, "--all-spaces"]
     }
     func complete(_ result: ApplyInfo, from before: PreviewInfo, elapsed: Int) {
         presentation = .live(nil)
         if result.undoable { remember(result.journal_path) }
         if let check = result.layout_check {
             preview = before.showing(check)
-            liveInventory = InventoryInfo(displays: check.displays, windows: check.windows)
+            liveInventory = check.inventory
             if liveTask != nil { windowPreviews.refresh(check.windows) }
         }
         status = "\(result.arranged) arranged · \(result.minimized) minimized · \(result.closed) closed · \(String(format: "%.1fs", Double(elapsed) / 1000))"
@@ -442,10 +424,10 @@ enum TidyError: LocalizedError {
         if result.failed > 0 {
             let failures = zip(before.plan.actions, result.results ?? []).filter { !$0.1.ok }
             if let first = failures.first {
-                error = "\(first.0.window.app_name): \(first.1.error ?? "Couldn’t apply this change.") Refresh to review."
-            } else { error = result.failed == 1 ? "One window couldn’t be changed. Refresh to review." : "\(result.failed) windows couldn’t be changed. Refresh to review." }
+                error = "\(first.0.window.app_name): \(first.1.error ?? "Couldn’t apply this change.") Arrange again to review."
+            } else { error = result.failed == 1 ? "One window couldn’t be changed. Arrange again to review." : "\(result.failed) windows couldn’t be changed. Arrange again to review." }
         }
-        if let check = result.layout_check, check.overlap_count > 0 { error = "\(check.overlap_count) overlapping pairs remain. Refresh to review." }
+        if let check = result.layout_check, check.overlap_count > 0 { error = "Some windows still overlap. Arrange again to review." }
     }
     func editDraft(_ arguments: [String]) {
         guard !busy, !editingDraft, hasLayout, let before = preview else { return }
@@ -487,7 +469,7 @@ enum TidyError: LocalizedError {
                 let response = try JSONDecoder().decode(Envelope<ApplyInfo>.self, from: data)
                 guard response.ok, let result = response.data else { throw TidyError.message(response.error ?? "Could not apply this layout.") }
                 complete(result, from: preview, elapsed: result.apply_ms)
-            } catch { self.error = error.localizedDescription; status = "Refresh your preview to continue."; hasLayout = false }
+            } catch { self.error = error.localizedDescription; status = "Arrange again to review."; hasLayout = false }
         }
     }
     func undo() {
@@ -748,20 +730,6 @@ struct Panel: View {
             if store.onboarding || store.showingSettings {
                 ScrollView { SettingsPanel(store: store).padding(.vertical, 4) }
             } else {
-                HStack(spacing: 10) {
-                    Picker("Window scope", selection: store.allSpaces) {
-                        Text("Current Space").tag(false)
-                        Text("All Spaces").tag(true)
-                    }.pickerStyle(.segmented).labelsHidden().controlSize(.small).frame(width: 214).accessibilityLabel("Window scope")
-                    if store.settings.allSpaces == true {
-                        Picker("Gather destination", selection: store.destination(\.gatherScreen)) {
-                            Text("Use display roles").tag("auto")
-                            ForEach(store.availableDisplays) { screen in
-                                Text(screen.built_in ? "Laptop" : screen.name).tag(screen.id)
-                            }
-                        }.labelsHidden().controlSize(.small)
-                    } else { Spacer(minLength: 0) }
-                }.disabled(store.busy || store.editingDraft)
                 DisplayGallery(store: store, captures: store.windowPreviews)
                     .frame(maxHeight: .infinity)
                 if store.hasLayout {
@@ -783,7 +751,7 @@ struct Panel: View {
                 } label: {
                     HStack(spacing: 8) {
                         if store.busy || store.editingDraft { ProgressView().controlSize(.small).tint(.white) }
-                        Text(store.busy ? "Preparing…" : store.editingDraft ? "Updating draft…" : store.hasLayout ? "Confirm arrangement" : store.hasStalePreview ? "Refresh arrangement" : "Arrange windows")
+                        Text(store.busy ? (store.hasLayout ? "Arranging…" : "Preparing…") : store.editingDraft ? "Updating draft…" : store.hasLayout ? "Confirm arrangement" : "Arrange windows")
                     }
                 }.buttonStyle(TidyButtonStyle()).disabled(store.busy || store.editingDraft)
                 Text(store.error ?? store.status).font(.system(size: 10))
@@ -810,29 +778,6 @@ struct Panel: View {
             .coordinateSpace(name: "fenletDraft")
             .onPreferenceChange(DraftTargets.self) { store.draftTargets = $0 }
             .overlay(alignment: .topLeading) { DraftGhost(cursor: store.draftCursor, captures: store.windowPreviews).allowsHitTesting(false) }
-    }
-}
-
-struct DisplayPreferences: View {
-    @ObservedObject var store: Store
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Display preferences").font(.system(size: 12, weight: .semibold))
-            placement("Work", icon: "briefcase", selection: store.destination(\.workScreen))
-            placement("Chat", icon: "bubble.left.and.bubble.right", selection: store.destination(\.chatScreen))
-            placement("References", icon: "book", selection: store.destination(\.referenceScreen))
-            Text("Automatic adapts to every connected display, including a single screen.").font(.system(size: 10)).foregroundStyle(.secondary)
-        }.padding(12).background(.quaternary.opacity(0.2), in: RoundedRectangle(cornerRadius: 12))
-    }
-    private func placement(_ title: String, icon: String, selection: Binding<String>) -> some View {
-        HStack {
-            Label(title, systemImage: icon).font(.system(size: 11))
-            Spacer()
-            Picker(title, selection: selection) {
-                Text("Automatic").tag("auto")
-                ForEach(store.availableDisplays) { screen in Text(screen.name).tag(screen.id) }
-            }.labelsHidden().frame(maxWidth: 190).accessibilityLabel(title + " display")
-        }
     }
 }
 
@@ -909,7 +854,6 @@ struct SettingsPanel: View {
             } else {
                 PermissionSetup(store: store, captures: store.windowPreviews)
             }
-            if !store.onboarding { DisplayPreferences(store: store) }
             VStack(alignment: .leading, spacing: 10) {
                 Picker("Provider", selection: $store.settings.provider) {
                     Text("Vercel AI Gateway").tag("gateway")

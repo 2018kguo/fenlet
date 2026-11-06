@@ -190,6 +190,9 @@ def main():
     with tempfile.TemporaryDirectory(prefix="fenlet-widget-") as directory:
         directory = Path(directory)
         executable = directory / "FenletWidgetFixture"
+        # Legacy choices must not pin the new automatic widget to a laptop or
+        # restrict it to one Desktop when a monitor is attached.
+        (directory / "config.json").write_text(json.dumps(dict(model="beam", provider="gateway", allSpaces=False, gatherScreen="laptop", workScreen="laptop", chatScreen="laptop")))
         (directory / "bin").mkdir()
         (directory / "bin/fenlet").symlink_to(ROOT / "bin/fenlet")
         build_fixture(executable)
@@ -267,7 +270,7 @@ def main():
                 if mode in ("background", "spaces"): cancel_draft(window, data)
                 if mode == "spaces":
                     data = snapshot(window)
-                    assert any(e.get("label", "").startswith("Gather destination") for e in data["ui_elements"]), "All Spaces destination is hidden."
+                    assert not any(e.get("label", "").startswith(("Gather destination", "Window scope")) for e in data["ui_elements"]), "A display or Desktop mode is required before arranging."
                     panes = [e["bounds"] for e in data["ui_elements"] if e.get("label", "").startswith("Preview ")]
                     assert len(panes) == 3
                     for i, a in enumerate(panes):

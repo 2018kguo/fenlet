@@ -268,7 +268,7 @@ def inventory(*, all_spaces=False):
                      and (prior_id is None or w["id"] == prior_id)]
     if prior_windows and not any(w.get("is_focused") for w in eligible):
         prior_windows[0]["is_focused"] = True
-    return {"created_at": time.time(), "displays": displays, "windows": windows, "all_spaces": all_spaces,
+    return {"created_at": time.time(), "displays": displays, "windows": windows, "all_spaces": observed.get("all_spaces", all_spaces),
             "coverage": observed["coverage"],
             "scan_ms": round((time.monotonic() - start) * 1000)}
 
@@ -303,7 +303,7 @@ def request_json(url, payload, key):
 
 
 def verified_layout_roles(inv, intent):
-    """Reuse reviewed placements only while their actual window identities and frames match."""
+    """Reuse reviewed placements while windows and the connected display setup match."""
     try:
         history = json.loads((STATE / "widget-history.json").read_text())
         # Decode histories written before confirmations and Undo had separate pointers.
@@ -314,8 +314,13 @@ def verified_layout_roles(inv, intent):
         if entries[0].get("scope") != "windows":
             return {}
         plan = json.loads(Path(entries[0]["plan_path"]).read_text())
+        def display_configuration(screens):
+            # Desktop selection changes where to gather, not which physical
+            # display should hold work. Every physical setup change does.
+            return {s["id"]: {k: v for k, v in s.items() if k != "gather_space"} for s in screens}
         if (plan["intent"] != intent or plan["inventory"].get("display_preferences", {}) != inv.get("display_preferences", {})
-            or plan["inventory"].get("all_spaces", False) != inv.get("all_spaces", False)):
+            or plan["inventory"].get("all_spaces", False) != inv.get("all_spaces", False)
+            or display_configuration(plan["inventory"]["displays"]) != display_configuration(inv["displays"])):
             return {}
         finished = {e["index"]: e["result"] for e in entries if e["event"] == "finished"}
         current = {w["id"]: w for w in eligible_windows(inv)}

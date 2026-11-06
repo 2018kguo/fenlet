@@ -13,6 +13,18 @@ from tests.test_core import inventory, window
 
 
 class InventoryContextTest(unittest.TestCase):
+    def test_unsupported_cross_desktop_api_keeps_visible_windows_arrangeable(self):
+        from fenlet.runtime import inventory as scan
+        work = window("work", "Rex Beta", focused=True)
+        observed = {**inventory([work]), "all_spaces": False, "coverage": {"complete": False, "errors": [{"app": "Fenlet", "error": "Other Desktops unavailable."}]}}
+        with tempfile.TemporaryDirectory() as d, patch("fenlet.runtime.STATE", Path(d)), patch("fenlet.runtime.native_json", return_value=observed):
+            inv = scan(all_spaces=True)
+        self.assertFalse(inv["all_spaces"])
+        self.assertFalse(inv["coverage"]["complete"])
+        action = build_actions(inv, [{"id": "work", "role": "display_external"}])[0]
+        self.assertEqual(action["kind"], "move")
+        self.assertNotIn("target_space", action)
+
     def test_work_focus_uses_exact_window_and_disproved_constraints_are_discarded(self):
         from fenlet.runtime import inventory as scan
         work = {**window("work", "Google Chrome"), "min_size": dict(width=500, height=320)}
@@ -92,6 +104,13 @@ class DecisionCacheTest(unittest.TestCase):
                 with patch("fenlet.runtime.request_decisions", return_value=(classifier, {"latency_ms": 10})):
                     result, _ = decide(changed, "Arrange", use_cache=True)
                 self.assertEqual(next(d["role"] for d in result if d["id"] == "w-3"), "minimize")
+            connected = copy.deepcopy(observed)
+            connected["displays"].append({**connected["displays"][0], "id": "new-monitor", "name": "New monitor"})
+            automatic = [{"id": w["id"], "role": "display_new-monitor"} for w in connected["windows"]]
+            with patch("fenlet.runtime.request_decisions", return_value=(automatic, {"latency_ms": 10})) as request:
+                result, _ = decide(connected, "Arrange", use_cache=True)
+            request.assert_called_once()
+            self.assertEqual(result, automatic, "A confirmed laptop layout overrode the newly connected monitor.")
             with patch("fenlet.runtime.request_decisions", return_value=(classifier, {"latency_ms": 10})) as request:
                 changed_intent, _ = decide(observed, "Different instructions", use_cache=True)
             request.assert_called_once()

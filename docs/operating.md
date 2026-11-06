@@ -33,30 +33,36 @@ PATH and links the included skill into `~/.codex/skills/fenlet`. Open a new
 terminal after installing. Agents with another skill directory can install
 from the public repository instead.
 
-## Gather windows from other Spaces
+## Arrange your workspace
 
-Choose **All Spaces** in the widget, then **Laptop** in the destination menu
-(or any connected display). **Arrange windows** prepares an editable draft;
-**Confirm arrangement** brings the selected windows onto that display's regular
-Desktop and tiles them. Fullscreen apps leave fullscreen on confirmation.
-A live overview shows separate thumbnails for windows from different Spaces.
+Click **Arrange windows**, adjust the draft if you want, then **Confirm arrangement**.
+Fenlet automatically uses the connected displays: work goes on the largest useful
+screen, and chat and references use another display when there is room. On one
+screen, useful overflow goes into the draft’s minimize tray. Connecting or
+removing a monitor updates the layout without choosing a mode or destination.
+Older widget destination settings are ignored.
 
-For an offline preview of the same operation:
+Windows from other Desktops are included automatically. Confirmation gathers
+selected windows onto the regular Desktop for each destination display.
+Fullscreen apps leave fullscreen on confirmation. Previewing never switches
+Desktops or changes fullscreen. Confirmation may animate a fullscreen transition;
+Fenlet never activates or raises another app to arrange it.
+
+The CLI also supports explicit scope and destination choices. For an offline
+preview that gathers onto your laptop:
 
 ```sh
 fenlet tile --all-spaces --display laptop
 fenlet apply PLAN_PATH --yes
 ```
 
-Add `--all-spaces --display laptop` to `plan` or `arrange` to also classify
-background windows and clutter. Omit `--display` to use the usual display roles.
-**Current Space** remains the default. Previewing never switches Spaces or
-leaves fullscreen. Confirmation may briefly animate a fullscreen transition;
-Fenlet never activates or raises another app to arrange it.
+Omit `--display` in `plan` or `arrange` to use the automatic display roles.
 
 All Spaces uses optional, undocumented macOS window-management APIs; no root
 helper, SIP changes, or extra installation is required. Availability can change
-with macOS. Discovery is bounded, and windows that cannot be resolved are
+with macOS. If that capability is unavailable, the same workflow arranges visible
+windows and reports that other Desktops could not be inspected. Discovery is
+bounded, and windows that cannot be resolved are
 reported rather than moved speculatively. Hidden/minimized apps and windows
 pinned to multiple Spaces are excluded. The destination must have an existing
 regular Desktop. Fenlet does not create, delete, or reorder regular Desktops.
@@ -86,7 +92,7 @@ python3 scripts/benchmark.py --repeats 2
 
 Layout requests send app names, window titles, and your instructions to the chosen provider. Window images stay local. Fenlet only organizes windows; it does not scan or modify Desktop files. There are no background model calls. Private plans/journals live in `~/.local/state/fenlet`; settings live in `~/.config/fenlet`.
 
-Window thumbnails use ScreenCaptureKit on macOS 14+ and optional Screen Recording permission. Use “Allow…” below the preview if permission is missing. Arrangement still works without it. Captures stay in widget memory, never go to the provider, and are never saved to disk. While the widget is open, window positions and images refresh about once a second. Closing it stops refreshes. These updates make no model calls and never scan Desktop files. A budget of 24 small images limits memory; inspecting a window prioritizes it. A desktop geometry change invalidates an old proposed layout. Captures never block the CLI or arrangement.
+Window thumbnails use ScreenCaptureKit on macOS 14+ and optional Screen Recording permission. Onboarding guides you through this permission; you can also enable it in Settings. Arrangement still works without it. Captures stay in widget memory, never go to the provider, and are never saved to disk. While the widget is open, window positions and images refresh about once a second. Closing it stops refreshes. These updates make no model calls and never scan Desktop files. A budget of 24 small images limits memory; inspecting a window prioritizes it. A desktop geometry change invalidates an old proposed layout. Captures never block the CLI or arrangement.
 
 Identical classification inputs reuse a private result for up to 60 seconds. Changes to titles, focus, process identities, instructions, display preferences or model invalidate it. Geometry and permission to act are checked fresh every time. Fenlet never enumerates Desktop files.
 

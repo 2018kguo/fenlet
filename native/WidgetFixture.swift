@@ -11,12 +11,17 @@ import SwiftUI
         let store = Store()
         store.journal = nil
         store.liveInventory = preview.plan.inventory
-        if preview.plan.inventory.all_spaces == true {
-            store.settings.allSpaces = true
-            store.settings.gatherScreen = preview.plan.inventory.displays.first?.id
-        }
         store.preview = preview; store.hasLayout = true; store.liveReadOK = true
         if CommandLine.arguments.contains("--verify-state") {
+            precondition(store.settings.model == "beam", "Existing configuration failed to load.")
+            let arguments = store.layoutArguments("plan")
+            precondition(store.scanArguments == ["scan", "--all-spaces"] && arguments.contains("--all-spaces"))
+            precondition(!arguments.contains(where: { ["--display", "--work-display", "--chat-display", "--reference-display"].contains($0) }), "An old display choice overrode the connected setup.")
+            store.windowPreviews.loadDemo(preview.plan.inventory.windows)
+            store.error = "An old display error"
+            store.observeInventory(InventoryInfo(displays: [], windows: preview.plan.inventory.windows))
+            precondition(!store.hasLayout && store.availableDisplays.isEmpty && store.error == nil, "A changed display setup retained the old draft or error.")
+            store.liveInventory = preview.plan.inventory; store.preview = preview; store.hasLayout = true
             let failure = ApplyInfo(journal_path: "synthetic", succeeded: 0, failed: 1, planned: 1, apply_ms: 12,
                 closed: 0, arranged: 0, minimized: 0, undoable: false,
                 layout_check: .init(overlap_count: 0, windows: preview.plan.inventory.windows, displays: preview.plan.inventory.displays),
@@ -34,6 +39,7 @@ import SwiftUI
             precondition(store.updatePermissions(.init(accessibility: true, screen_recording: true)), "New grants did not finish setup.")
             precondition(!store.onboarding)
             store.error = nil; store.preview = preview; store.hasLayout = true
+            store.status = "Nothing moves or closes until you confirm."
         }
         if CommandLine.arguments.contains("--onboarding") {
             store.onboarding = true; store.accessibility = false; store.keyConfigured = true

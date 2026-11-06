@@ -33,6 +33,21 @@ class LayoutTest(unittest.TestCase):
         self.assertTrue(all(a["target"]["height"] == 893 for a in moves))
         self.assertEqual({a["window"]["id"] for a in actions if a["kind"] == "minimize"}, {"settings", "chat"})
 
+    def test_automatic_roles_follow_monitor_connection_and_removal(self):
+        inv = inventory([])
+        laptop = inv["displays"][1]
+        external = inv["displays"][0]
+        inv["displays"] = [laptop]
+        self.assertEqual({s["id"] for s in display_assignments(inv).values()}, {"laptop"})
+        inv["displays"] = [laptop, external]
+        roles = display_assignments(inv)
+        self.assertEqual(roles["work"]["id"], "external")
+        self.assertEqual(roles["chat"]["id"], "laptop")
+        inv["displays"] = [laptop]
+        self.assertEqual({s["id"] for s in display_assignments(inv).values()}, {"laptop"})
+        inv["displays"] = [laptop, {**external, "id": "new-monitor"}]
+        self.assertEqual(display_assignments(inv)["work"]["id"], "new-monitor")
+
     def test_portrait_display_can_stack_readable_panes(self):
         ws = [window(f"w-{i}") for i in range(4)]
         usable = dict(x=0, y=30, width=1080, height=1860)

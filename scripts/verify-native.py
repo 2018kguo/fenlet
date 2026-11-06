@@ -15,6 +15,58 @@ from fenlet import runtime, operations
 from fenlet.core import same_bounds, frames_overlap
 
 
+def verify_cross_display(windows, directory):
+    """Moving between displays must preserve the target Desktop and geometry."""
+    inv = runtime.inventory(all_spaces=True)
+    if len(inv["displays"]) < 2:
+        return {"exercised": False, "reason": "Only one display is connected."}
+    original = next(w for w in inv["windows"] if w["id"] == windows[0]["id"] and w["pid"] == windows[0]["pid"])
+    b = original["bounds"]
+    destination = next(s for s in inv["displays"] if not (s["bounds"]["x"] <= b["x"] + b["width"]/2 < s["bounds"]["x"] + s["bounds"]["width"]
+        and s["bounds"]["y"] <= b["y"] + b["height"]/2 < s["bounds"]["y"] + s["bounds"]["height"]))
+    u = destination["usable"]
+    action = {"kind": "move", "window": original, "target": dict(x=u["x"]+6, y=u["y"]+6, width=700, height=600),
+              "target_space": destination["gather_space"]}
+    moved = runtime.native_window_batch([action], expected_displays=inv["displays"])
+    after = operations.observed_window(original, moved.results[original["id"]])
+    assert operations.window_matches(action, after), moved.results
+    assert moved.focus_check["unchanged"] is True, moved.focus_check
+    journal = directory / "cross-display.jsonl"
+    journal.write_text("".join(json.dumps(e)+"\n" for e in [
+        {"event": "begin", "scope": "windows"},
+        {"event": "started", "index": 0, "item": action},
+        {"event": "finished", "index": 0, "result": {"ok": True, "after": after}}]))
+    with patch("fenlet.operations.STATE", directory / "state"):
+        undone = operations.undo(journal)
+        assert undone["restored"] == 1 and not undone["skipped"], undone
+        assert undone["focus_check"]["unchanged"] is True, undone["focus_check"]
+    return {"exercised": True, "destination_membership_and_geometry": True, "roundtrip_undo": True, "focus_preserved": True}
+
+
+def verify_visible_fallback(windows, directory):
+    """The same automatic request still works without the optional OS bridge."""
+    executable = directory / "helper-without-spaces"
+    subprocess.run(["xcrun", "swiftc", "-O", "-D", "FENLET_NO_SPACE_BRIDGE", "-import-objc-header", str(ROOT / "native/Bridge.h"),
+                    str(ROOT / "native/Helper.swift"), "-o", str(executable)], check=True)
+    with patch("fenlet.runtime.native", return_value=str(executable)), patch("fenlet.runtime._native_session", None):
+        try:
+            inv = runtime.inventory(all_spaces=True)
+            assert inv["all_spaces"] is False and inv["coverage"]["complete"] is False
+            assert any("other Desktops" in e["error"] for e in inv["coverage"]["errors"])
+            original = next(w for w in inv["windows"] if w["id"] == windows[0]["id"] and w["pid"] == windows[0]["pid"])
+            target = {**original["bounds"], "y": original["bounds"]["y"] + 10}
+            action = {"kind": "move", "window": original, "target": target}
+            moved = runtime.native_window_batch([action], expected_displays=inv["displays"])
+            after = operations.observed_window(original, moved.results[original["id"]])
+            assert operations.window_matches(action, after) and moved.focus_check["unchanged"] is True
+            restore = {"kind": "move", "window": after, "target": original["bounds"]}
+            restored = runtime.native_window_batch([restore])
+            assert operations.window_matches(restore, operations.observed_window(after, restored.results[after["id"]]))
+        finally:
+            if runtime._native_session is not None: runtime._native_session.close()
+    return {"partial_coverage_reported": True, "visible_window_moves_work": True, "focus_preserved": True}
+
+
 def verify_spaces(fixture, references, directory):
     """Three owned windows across a Desktop and two fullscreen app Spaces."""
     normal_id = references("state")[0]["id"]
@@ -159,6 +211,9 @@ def main():
                 assert restored["focus_check"]["before"] == restored["focus_check"]["after"]
                 assert operations.undo(journal)["restored"] == 0
             report["minimize_move_and_batched_undo"] = True
+
+            report["cross_display"] = verify_cross_display(windows, directory)
+            report["without_space_bridge"] = verify_visible_fallback(windows, directory)
 
             closed = runtime.native_window_batch([{"kind": "close", "window": {**before_min, "title_source": "ax"}}])
             assert closed.results[before_min["id"]].get("closed"), closed.results

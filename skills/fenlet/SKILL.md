@@ -25,7 +25,7 @@ scripts/fenlet check
 scripts/fenlet undo JOURNAL_PATH
 ```
 
-Use the final OS overlap check as evidence. Report remaining overlaps and inaccessible windows; never infer success from the number of delivered actions. Default scope is visible windows on current Spaces, excluding Fenlet and Google Chrome for Testing. When intent includes other Spaces/fullscreen apps, use `--all-spaces`; `--display laptop` gathers onto the built-in display, or pass a connected display UUID. Read `coverage.errors`: unresolved windows are left alone. Fullscreen exits only during apply; macOS may animate or briefly change focus. The widget exposes All Spaces and a gather destination, with a read-only draft before confirmation.
+Use the final OS overlap check as evidence. Report remaining overlaps and inaccessible windows; never infer success from the number of delivered actions. Default scope is visible windows on current Spaces, excluding Fenlet and Google Chrome for Testing. When intent includes other Spaces/fullscreen apps, use `--all-spaces`; `--display laptop` gathers onto the built-in display, or pass a connected display UUID. Read `coverage.errors`: unresolved windows are left alone. Fullscreen exits only during apply; macOS may animate or briefly change focus. The widget automatically includes other Desktops and adapts display roles to the connected screens. It has one Arrange → review → confirm flow; explicit scope and destination overrides remain available through the CLI.
 
 For deterministic operations without a model:
 

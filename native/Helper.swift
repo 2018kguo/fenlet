@@ -26,7 +26,11 @@ final class SpaceBridge: @unchecked Sendable {
     private let setWorkspace: (@convention(c) (Int32, UnsafePointer<UInt32>, Int32, Int32) -> Int32)?
     private let moveManaged: (@convention(c) (Int32, CFArray, UInt64) -> Void)?
     init() {
+        #if FENLET_NO_SPACE_BRIDGE
+        let handle: UnsafeMutableRawPointer? = nil
+        #else
         let handle = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY)
+        #endif
         func symbol<T>(_ name: String, _ type: T.Type) -> T? {
             guard let handle, let address = name.withCString({ dlsym(handle, $0) }) else { return nil }
             return unsafeBitCast(address, to: type)
@@ -327,7 +331,7 @@ func batchWindows(_ request: BatchRequest) {
         }
         let actual = try! JSONDecoder().decode([DisplayCheck].self, from: JSONSerialization.data(withJSONObject: screens))
         if Dictionary(uniqueKeysWithValues: actual.map { ($0.id, $0) }) != Dictionary(uniqueKeysWithValues: expected.map { ($0.id, $0) }) {
-            output(["ok": false, "error": "Display arrangement changed. Make a fresh preview."]); return
+            output(["ok": false, "error": "Your display setup changed. Arrange windows again."]); return
         }
     }
     let bridge = SpaceBridge.shared
@@ -439,7 +443,7 @@ func batchWindows(_ request: BatchRequest) {
             }
             let fullscreen = (axValue(element, "AXFullScreen") as? NSNumber)?.boolValue == true
             if (axValue(element, kAXModalAttribute) as? NSNumber)?.boolValue == true || (fullscreen && w.space_ids == nil) {
-                results.set(index, ["id": w.id, "ok": false, "skipped": true, "error": "Kept a fullscreen window or dialog. Use All Spaces to gather fullscreen windows."]); continue
+                results.set(index, ["id": w.id, "ok": false, "skipped": true, "error": "Kept this fullscreen window or dialog."]); continue
             }
             var result: [String: Any] = ["id": w.id, "ok": true, "delivered": true]
             if ["move", "restore"].contains(action.kind), let target = action.target,
@@ -452,21 +456,23 @@ func batchWindows(_ request: BatchRequest) {
                     result["ok"] = false; result["error"] = "Fullscreen exit could not be verified; inspect before retrying."
                     results.set(index, result); continue
                 }
-                if let space = action.target_space, bridge.spaces(number) != [space] {
-                    _ = bridge.move(number, to: space)
-                    let deadline = min(transitionDeadline, Date().addingTimeInterval(1))
-                    while bridge.spaces(number) != [space] && Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
-                    guard bridge.spaces(number) == [space] else {
-                        result["ok"] = false; result["error"] = "Space transfer could not be verified; inspect before retrying."
-                        results.set(index, result); continue
-                    }
-                }
                 var resizable: DarwinBoolean = true
                 if AXUIElementIsAttributeSettable(element, kAXSizeAttribute as CFString, &resizable) == .success { result["resizable"] = resizable.boolValue }
                 if resizable.boolValue { placeWindow(element, target) }
                 else {
                     var p = CGPoint(x: target.x, y: target.y)
                     AXUIElementSetAttributeValue(element, kAXPositionAttribute as CFString, AXValueCreate(.cgPoint, &p)!)
+                }
+                // Moving the frame across displays can change its Desktop. Do
+                // that first; a later AX write can undo a WindowServer transfer.
+                if let space = action.target_space, bridge.spaces(number) != [space] {
+                    _ = bridge.move(number, to: space)
+                    let deadline = min(transitionDeadline, Date().addingTimeInterval(1))
+                    while bridge.spaces(number) != [space] && Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
+                    guard bridge.spaces(number) == [space] else {
+                        result["ok"] = false; result["error"] = "Couldn’t move this window to the target Desktop."
+                        results.set(index, result); continue
+                    }
                 }
                 if action.target_fullscreen == true {
                     bridge.transitionLock.lock(); defer { bridge.transitionLock.unlock() }
@@ -595,7 +601,7 @@ func batchWindows(_ request: BatchRequest) {
                 ordered[index]["minimized"] = nil
             }
             if let target = action.target_space, action.target_fullscreen != true, spaces != [target] {
-                ordered[index]["ok"] = false; ordered[index]["error"] = "Window did not reach the reviewed Space."
+                ordered[index]["ok"] = false; ordered[index]["error"] = "Couldn’t move this window to the target Desktop."
             }
         }
         if action.kind == "minimize", let element = results.element(index) {
@@ -737,13 +743,17 @@ func inventoryData(entries: [[String: Any]], focus: [String: Any], allSpaces: Bo
 
 func inventory(allSpaces: Bool = false) {
     guard AXIsProcessTrusted() else { output(["ok": false, "error": "Allow Fenlet in System Settings → Privacy & Security → Accessibility."]); return }
-    if allSpaces && !SpaceBridge.shared.available {
-        output(["ok": false, "error": "All Spaces is unavailable on this macOS version. Use Current Space."]); return
-    }
-    guard let entries = CGWindowListCopyWindowInfo(allSpaces ? [.optionAll, .excludeDesktopElements] : [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
+    let canGather = allSpaces && SpaceBridge.shared.available && !SpaceBridge.shared.destinations().isEmpty
+    guard let entries = CGWindowListCopyWindowInfo(canGather ? [.optionAll, .excludeDesktopElements] : [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
         output(["ok": false, "error": "The current screen inventory is unavailable."]); return
     }
-    output(["ok": true, "data": inventoryData(entries: entries, focus: currentFocus(), allSpaces: allSpaces)])
+    var data = inventoryData(entries: entries, focus: currentFocus(), allSpaces: canGather)
+    if allSpaces && !canGather, var coverage = data["coverage"] as? [String: Any] {
+        var errors = coverage["errors"] as? [[String: String]] ?? []
+        errors.append(["app": "Fenlet", "error": "This macOS version only exposes visible windows. Windows on other Desktops are left alone."])
+        coverage["errors"] = errors; coverage["complete"] = false; data["coverage"] = coverage
+    }
+    output(["ok": true, "data": data])
 }
 
 func nativeCommand(_ command: String, payload: Data? = nil) -> Bool {

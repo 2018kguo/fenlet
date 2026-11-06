@@ -15,8 +15,8 @@ rest. It adapts to a laptop alone, several displays, and portrait monitors.
 A small native widget, a CLI, and an agent skill share the same planner.
 Click **Arrange windows**, adjust the draft by dragging tiles, then
 **Confirm arrangement**. Nothing moves or closes before confirmation.
-Choose **All Spaces → Laptop** to bring fullscreen apps and windows from other
-Spaces together onto your laptop.
+Fenlet includes windows from other Desktops automatically and adapts when you
+connect or disconnect a monitor. There’s no mode or destination to select.
 
 <p align="center"><a href="docs/demo.mp4"><img src="docs/demo.gif" width="1100" alt="Nine overlapping windows become a focused workspace: browser beside terminal on the work display, chat and references on the laptop, and clutter out of the way."></a></p>
 <p align="center"><sub>Arrange. Review. Back to work. <a href="docs/demo.mp4">Watch in full quality</a>.<br>Illustrated desktop with the real Fenlet widget and planner. Example content; timing is illustrative.</sub></p>
@@ -55,8 +55,8 @@ covers builds, verification, and releases.
 - **Tall, readable panes.** Tight 6-point gaps, native app minimums, and
   physical display dimensions guide placement. Text panes favor 6–8 inches
   of width when space permits; narrow portrait screens use their height.
-- **Review the whole workspace.** Work, chat, and reference displays can be
-  Automatic or selected in Settings. Windows marked **To minimize** or
+- **Review the whole workspace.** Work, chat, and references use the available
+  displays automatically. Windows marked **To minimize** or
   **To close** remain visible in the draft. Drag one back to keep it on screen.
 - **Keep your choices.** Already fitting tiles retain their order. Repeat
   previews reuse confirmed placements while the windows, positions, and
