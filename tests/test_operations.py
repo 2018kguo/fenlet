@@ -81,6 +81,18 @@ class SafetyTest(unittest.TestCase):
             self.assertFalse(frames_overlap(*(r["after"]["bounds"] for r in results)))
             self.assertGreaterEqual(calls[-1][1]["target"]["width"], 770)
 
+    def test_unresponsive_resize_does_not_become_a_permanent_minimum(self):
+        w = window()
+        inv = inventory([w]); inv["displays"] = inv["displays"][1:]
+        action = {"kind": "move", "window": w, "display": "laptop", "target": dict(x=10, y=20, width=600, height=600)}
+        actual = batch({w["id"]: {"bounds": w["bounds"], "minimized": False}})
+        with tempfile.TemporaryDirectory() as d, patch("fenlet.operations.STATE", Path(d)), patch("fenlet.operations.native_window_batch", return_value=actual) as native:
+            with open(Path(d)/"journal", "w") as log:
+                result = apply_window_batch({"inventory": inv, "actions": [action]}, log)
+            self.assertFalse(result.results[0]["ok"])
+            self.assertEqual(native.call_count, 1)
+            self.assertFalse((Path(d)/"window-constraints.json").exists())
+
     def test_closed_window_does_not_break_layout_undo(self):
         with tempfile.TemporaryDirectory() as directory, patch("fenlet.operations.STATE", Path(directory) / "state"):
             journal = Path(directory) / "journal.jsonl"

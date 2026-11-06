@@ -109,7 +109,12 @@ struct WorkFocus {
         guard let app, app.processIdentifier != ProcessInfo.processInfo.processIdentifier,
               !["com.apple.systempreferences", "com.apple.keychainaccess", "com.apple.ActivityMonitor"].contains(app.bundleIdentifier ?? ""),
               let rows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]],
-              let row = rows.first(where: { ($0[kCGWindowOwnerPID as String] as? Int32) == app.processIdentifier && ($0[kCGWindowLayer as String] as? Int) == 0 }),
+              let row = rows.first(where: { row in
+                  guard (row[kCGWindowOwnerPID as String] as? Int32) == app.processIdentifier,
+                        (row[kCGWindowLayer as String] as? Int) == 0,
+                        let bounds = row[kCGWindowBounds as String] as? [String: Double] else { return false }
+                  return (bounds["Width"] ?? 0) >= 500 && (bounds["Height"] ?? 0) >= 320
+              }),
               let number = row[kCGWindowNumber as String] as? UInt32 else { return nil }
         return WorkFocus(pid: app.processIdentifier, windowID: "w-\(number)")
     }

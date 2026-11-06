@@ -239,7 +239,8 @@ def inventory(*, all_spaces=False):
     displays, windows = observed["displays"], observed["windows"]
     candidates = [w for w in windows if w["app_name"] not in ("Fenlet", "Google Chrome for Testing")]
     constraints_path = STATE / "window-constraints.json"
-    constraints = json.loads(constraints_path.read_text()) if constraints_path.exists() else {}
+    stored = json.loads(constraints_path.read_text()) if constraints_path.exists() else {}
+    constraints = stored.get("windows", {}) if stored.get("version") == 2 else {}
     # CG already supplies current rectangles. Avoid querying every app's AX
     # tree before classification; actuation validates identities and frames.
     missing = [w for w in candidates if w.get("title_source") == "app"]
@@ -262,9 +263,10 @@ def inventory(*, all_spaces=False):
     # Opening the popover should not make the user's underlying work lose priority.
     prior_pid = os.environ.get("FENLET_FRONTMOST_PID")
     prior_id = os.environ.get("FENLET_FRONTMOST_WINDOW_ID")
-    prior_windows = [w for w in windows if str(w["pid"]) == prior_pid and not w.get("minimized")
+    eligible = eligible_windows(observed)
+    prior_windows = [w for w in eligible if str(w["pid"]) == prior_pid
                      and (prior_id is None or w["id"] == prior_id)]
-    if prior_windows and not any(w.get("is_focused") for w in candidates):
+    if prior_windows and not any(w.get("is_focused") for w in eligible):
         prior_windows[0]["is_focused"] = True
     return {"created_at": time.time(), "displays": displays, "windows": windows, "all_spaces": all_spaces,
             "coverage": observed["coverage"],

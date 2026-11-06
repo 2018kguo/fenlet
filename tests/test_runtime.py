@@ -20,11 +20,32 @@ class InventoryContextTest(unittest.TestCase):
         widget = {**window("widget", "Fenlet", focused=True), "pid": 999}
         observed = {**inventory([chat, work, widget]), "coverage": {"complete": True, "errors": []}}
         with tempfile.TemporaryDirectory() as d, patch("fenlet.runtime.STATE", Path(d)), patch("fenlet.runtime.native_json", return_value=observed), patch.dict("os.environ", {"FENLET_FRONTMOST_PID": "100", "FENLET_FRONTMOST_WINDOW_ID": "work"}):
-            (Path(d)/"window-constraints.json").write_text(json.dumps({"proc-100/work": dict(width=900, height=893)}))
+            (Path(d)/"window-constraints.json").write_text(json.dumps({"version": 2, "windows": {"proc-100/work": dict(width=900, height=893)}}))
             result = scan()
         self.assertTrue(next(w for w in result["windows"] if w["id"] == "work")["is_focused"])
         self.assertFalse(next(w for w in result["windows"] if w["id"] == "chat")["is_focused"])
         self.assertEqual(work["min_size"], dict(width=800, height=600))
+
+    def test_legacy_unverified_size_limits_do_not_displace_a_work_terminal(self):
+        from fenlet.runtime import inventory as scan
+        work = window("work", "Rex Beta", focused=True)
+        observed = {**inventory([work]), "coverage": {"complete": True, "errors": []}}
+        with tempfile.TemporaryDirectory() as d, patch("fenlet.runtime.STATE", Path(d)), patch("fenlet.runtime.native_json", return_value=observed):
+            (Path(d)/"window-constraints.json").write_text(json.dumps({"proc-100/work": dict(width=500, height=893)}))
+            inv = scan()
+        self.assertNotIn("min_size", work)
+        self.assertEqual(build_actions(inv, [{"id": "work", "role": "display_laptop"}])[0]["kind"], "move")
+
+    def test_browser_automation_permission_prompt_is_not_work_or_clutter(self):
+        from fenlet.runtime import inventory as scan
+        from fenlet.core import eligible_windows
+        dialog = {**window("prompt", "Google Chrome"), "title": "Allow remote debugging?"}
+        work = window("work", "Google Chrome")
+        observed = {**inventory([dialog, work]), "coverage": {"complete": True, "errors": []}}
+        with tempfile.TemporaryDirectory() as d, patch("fenlet.runtime.STATE", Path(d)), patch("fenlet.runtime.native_json", return_value=observed), patch.dict("os.environ", {"FENLET_FRONTMOST_PID": "100", "FENLET_FRONTMOST_WINDOW_ID": "prompt"}):
+            inv = scan()
+        self.assertEqual([w["id"] for w in eligible_windows(inv)], ["work"])
+        self.assertFalse(dialog["is_focused"])
 
 
 class DecisionCacheTest(unittest.TestCase):

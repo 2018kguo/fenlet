@@ -22,7 +22,7 @@ class LayoutTest(unittest.TestCase):
     def test_short_laptop_keeps_work_pair_tall_and_backgrounds_overflow(self):
         ws = [window("settings", "System Settings"), window("chat", "Google Chrome"),
               window("terminal", "Rex Beta", focused=True), window("browser", "Google Chrome")]
-        ws[1]["title"] = "Example (Channel) - Team - Slack - Google Chrome"
+        ws[1]["title"] = "Example (Channel) - Team - Slack"
         inv = inventory(ws)
         inv["displays"] = [dict(id="laptop", name="Laptop", built_in=True,
             bounds=dict(x=0, y=0, width=1512, height=982), usable=dict(x=0, y=33, width=1512, height=905),

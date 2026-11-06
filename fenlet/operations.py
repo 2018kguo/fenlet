@@ -109,7 +109,7 @@ def window_matches(action, live):
     if action["kind"] == "move" and live:
         b, t = live["bounds"], action["target"]
         return (not live.get("minimized") and abs(b["x"] - t["x"]) <= 2 and abs(b["y"] - t["y"]) <= 2
-                and b["width"] <= t["width"] + 1 and b["height"] <= t["height"] + 1)
+                and b["width"] <= t["width"] + 2 and b["height"] <= t["height"] + 2)
     return bool(live and (live.get("minimized") if action["kind"] == "minimize"
                           else not live.get("minimized") and fits_tile(live["bounds"], action["target"])))
 
@@ -160,7 +160,10 @@ def apply_window_batch(p, f):
         group = [(i, a) for i, a in selected if a["kind"] == "move" and a["display"] == screen["id"]]
         if not group or not all(results[i].get("after") and gathered(a, results[i]["after"]) for i, a in group):
             continue
-        clamped = any(results[i]["after"]["bounds"][k] > a["target"][k] + 1 for i, a in group for k in ("width", "height"))
+        def confirmed_clamp(i, action, axis):
+            actual = results[i]["after"]["bounds"][axis]
+            return action["target"][axis] + 2 < actual < action["window"]["bounds"][axis] - 1
+        clamped = any(confirmed_clamp(i, a, k) for i, a in group for k in ("width", "height"))
         if not clamped:
             continue
         windows = []
@@ -168,15 +171,16 @@ def apply_window_batch(p, f):
             w = results[i]["after"]
             minimum = dict(w.get("min_size", {"width": 500, "height": 320}))
             for key in ("width", "height"):
-                if w["bounds"][key] > a["target"][key] + 1:
+                if confirmed_clamp(i, a, key):
                     minimum[key] = w["bounds"][key]
             windows.append({**w, "min_size": minimum})
         targets = constrained_tiles(windows, screen["usable"], screen)
         constraint_path = STATE / "window-constraints.json"
-        learned = json.loads(constraint_path.read_text()) if constraint_path.exists() else {}
+        stored = json.loads(constraint_path.read_text()) if constraint_path.exists() else {}
+        learned = stored.get("windows", {}) if stored.get("version") == 2 else {}
         for w in windows:
             learned[w["process_instance"] + "/" + w["id"]] = w["min_size"]
-        replace_private_json(constraint_path, dict(list(learned.items())[-128:]))
+        replace_private_json(constraint_path, {"version": 2, "windows": dict(list(learned.items())[-128:])})
         if targets is None:
             continue
         repairs = [{"kind": "move", "window": w, "target": t} for w, t in zip(windows, targets)]

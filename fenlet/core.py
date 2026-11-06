@@ -16,7 +16,7 @@ def window_usage(window):
     if app in UTILITY_APPS or window.get("bundle_id") in ("com.apple.systempreferences", "com.apple.keychainaccess", "com.apple.ActivityMonitor"):
         return "utility"
     title = window.get("title", "").casefold()
-    if app in COMMUNICATION_APPS or app in BROWSER_APPS and any(hint in title for hint in (" - slack - ", " | slack", "microsoft teams", " - discord")):
+    if app in COMMUNICATION_APPS or app in BROWSER_APPS and (title.endswith((" - slack", " - discord")) or any(hint in title for hint in (" - slack - ", " | slack", "microsoft teams", " - discord"))):
         return "communication"
     return "terminal" if app in TERMINAL_APPS else "browser" if app in BROWSER_APPS else "other"
 
@@ -35,8 +35,10 @@ DEFAULT_INTENT = (
 
 
 def eligible_windows(inventory):
-    # Test browsers can belong to another automation run. Leave them alone.
+    # Test browsers and exact browser-automation prompts belong to an ongoing
+    # automation run. They are excluded during planning and verification alike.
     return [w for w in inventory["windows"] if not w.get("minimized") and not w.get("hidden") and not w.get("protected") and w.get("accessible", True)
+            and not (w["app_name"] == "Google Chrome" and w.get("title", "").casefold() == "allow remote debugging?")
             and w["app_name"] not in ("Fenlet", "Google Chrome for Testing")]
 
 
