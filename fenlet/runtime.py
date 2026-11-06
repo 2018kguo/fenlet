@@ -13,7 +13,7 @@ import atexit
 import select
 import threading
 
-from .core import model_state, validate_decisions, available_roles, eligible_windows
+from .core import model_state, validate_decisions, available_roles, eligible_windows, same_bounds
 from .questions import ESCALATE_BELOW_PROBABILITY, placements, jev_payload
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -297,9 +297,47 @@ def request_json(url, payload, key):
         raise RuntimeError(f"Model request failed: HTTP {e.code}. Check the key, model access and balance.")
 
 
+def verified_layout_roles(inv, intent):
+    """Reuse reviewed placements only while their actual window identities and frames match."""
+    try:
+        history = json.loads((STATE / "widget-history.json").read_text())
+        # Decode histories written before confirmations and Undo had separate pointers.
+        path = Path(history.get("confirmed_journal") or history["journal"])
+        if path.stat().st_size > 1_000_000:
+            return {}
+        entries = [json.loads(line) for line in path.read_text().splitlines()]
+        if entries[0].get("scope") != "windows":
+            return {}
+        plan = json.loads(Path(entries[0]["plan_path"]).read_text())
+        if plan["intent"] != intent or plan["inventory"].get("display_preferences", {}) != inv.get("display_preferences", {}):
+            return {}
+        finished = {e["index"]: e["result"] for e in entries if e["event"] == "finished"}
+        current = {w["id"]: w for w in eligible_windows(inv)}
+        displays = {s["id"] for s in inv["displays"]}
+        roles = {}
+        for index, action in enumerate(plan["actions"]):
+            result = finished.get(index, {})
+            if action["kind"] != "move" or not result.get("ok") or result.get("applied_kind", "move") != "move" or action["display"] not in displays:
+                continue
+            after = result.get("after") or {}
+            live = current.get(action["window"]["id"])
+            if (live and live["pid"] == after.get("pid") and live.get("process_instance") == after.get("process_instance")
+                and not after.get("minimized") and same_bounds(live["bounds"], after["bounds"], 2)):
+                roles[live["id"]] = "display_" + action["display"]
+        return roles
+    except (OSError, ValueError, KeyError, TypeError, IndexError):
+        return {}
+
+
 def decide(inv, intent, model="jev", provider="gateway", *, use_cache=False):
     if not use_cache:
         return request_decisions(inv, intent, model, provider)
+    retained = verified_layout_roles(inv, intent)
+    def reviewed(decisions):
+        return [{**d, "role": retained.get(d["id"], d["role"])} for d in decisions]
+    if retained and len(retained) == len(eligible_windows(inv)):
+        return [{"id": w["id"], "role": retained[w["id"]]} for w in eligible_windows(inv)], {
+            "model": MODELS[model], "provider": provider, "latency_ms": 0, "cost": 0, "cache_hit": True, "kept_reviewed_layout": True}
     state = model_state(inv, intent)
     state["windows"].sort(key=lambda w: w["id"])
     revision = hashlib.sha256((ROOT / "fenlet/questions.py").read_bytes() + INSTRUCTIONS.encode()).hexdigest()
@@ -310,7 +348,7 @@ def decide(inv, intent, model="jev", provider="gateway", *, use_cache=False):
         cached = json.loads(path.read_text())
         if 0 <= time.time() - cached["created_at"] <= 60:
             validate_decisions(eligible_windows(inv), cached["decisions"], available_roles(inv))
-            return cached["decisions"], {"model": MODELS[model], "provider": provider, "latency_ms": 0, "cost": 0, "cache_hit": True}
+            return reviewed(cached["decisions"]), {"model": MODELS[model], "provider": provider, "latency_ms": 0, "cost": 0, "cache_hit": True}
     except (OSError, ValueError, KeyError, TypeError):
         pass
     decisions, metadata = request_decisions(inv, intent, model, provider)
@@ -318,7 +356,7 @@ def decide(inv, intent, model="jev", provider="gateway", *, use_cache=False):
     owned = [p for p in path.parent.glob("*.json") if len(p.stem) == 64 and all(c in "0123456789abcdef" for c in p.stem)]
     for old in sorted(owned, key=lambda p: p.stat().st_mtime, reverse=True)[64:]:
         old.unlink(missing_ok=True)
-    return decisions, {**metadata, "cache_hit": False}
+    return reviewed(decisions), {**metadata, "cache_hit": False}
 
 
 def request_decisions(inv, intent, model="jev", provider="gateway"):

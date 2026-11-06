@@ -38,7 +38,7 @@ def controls(data):
     return {name: value["bounds"] for name, value in found.items()}
 
 
-def fixture(count, allow_portrait=True):
+def fixture(count, allow_portrait=True, mode="tiles"):
     screens, windows, decisions = [], [], []
     for index in range(count):
         portrait = allow_portrait and index % 2 == 1
@@ -47,15 +47,79 @@ def fixture(count, allow_portrait=True):
                       usable={**bounds, "y": 30, "height": bounds["height"] - 60},
                       physical_size_mm=dict(width=336 if portrait else 598, height=598 if portrait else 336))
         screens.append(screen)
+        if mode == "background" and index > 0: continue
         for position, app in enumerate(("Terminal", "Safari", "Notes")):
             w = dict(id=f"w-{index}-{position}", app_name=app, title=f"Example {position + 1}", pid=100,
                      process_instance="synthetic", accessible=True, minimized=False, is_focused=index == position == 0,
                      bounds=dict(x=bounds["x"] + 20, y=50, width=800, height=600))
-            windows.append(w); decisions.append(dict(id=w["id"], role="display_" + screen["id"]))
+            role = "minimize" if mode == "background" and position == 2 else "display_" + screen["id"]
+            windows.append(w); decisions.append(dict(id=w["id"], role=role))
+    if mode == "tiles":
+        for app, title, role in (("Music", "Background example", "minimize"), ("Calendar", "Old example", "close")):
+            w = {**windows[-1], "id": role, "app_name": app, "title": title, "is_focused": False}
+            windows.append(w); decisions.append(dict(id=w["id"], role=role))
     inventory = dict(displays=screens, windows=windows, scan_ms=0, created_at=time.time(), coverage=dict(complete=True, errors=[]))
     actions = build_actions(inventory, decisions)
     return dict(plan_path="synthetic", plan=dict(inventory=inventory, actions=actions), window_count=len(windows),
                 action_count=len(actions), model=None, coverage=dict(errors=[]))
+
+
+def drag(data, source, target):
+    receipt = subprocess.run(["peekaboo", "drag", "--from", source["id"], "--to", target["id"],
+                              "--snapshot", data["snapshot_id"], "--duration", "400ms", "--steps", "20", "--json"], capture_output=True, text=True)
+    response = json.loads(receipt.stdout)
+    assert response.get("success"), response.get("error")
+
+
+def restore_background_window(window, directory, data, before):
+    """Reproduce the three-window report through real gestures and the shared CLI."""
+    source_label = "Preview Notes: Example 3"
+    assert any(e.get("label") == source_label for e in data["ui_elements"]), "Background window vanished from the draft."
+    for source_label, target_label, kind, display, source_id in (
+            (source_label, "Drop a window here", "move", "screen-1", "w-0-2"),
+            (source_label, "To close after confirmation", "close", None, "w-0-2"),
+            ("Preview Safari: Example 2", source_label, "close", None, "w-0-1"),
+            (source_label, "Preview Terminal: Example 1", "move", "screen-0", "w-0-2"),
+            ("Preview Safari: Example 2", source_label, "move", "screen-0", "w-0-1")):
+        source = next(e for e in data["ui_elements"] if e.get("label") == source_label)
+        target = next(e for e in data["ui_elements"] if e.get("label") == target_label)
+        existing = set((directory / "state/plans").glob("*.json"))
+        drag(data, source, target)
+        deadline = time.monotonic() + 4
+        while True:
+            data = snapshot(window)
+            files = set((directory / "state/plans").glob("*.json")) - existing
+            if files:
+                assert len(files) == 1
+                plan = json.loads(next(iter(files)).read_text())
+                action = next(a for a in plan["actions"] if a["window"]["id"] == source_id)
+                assert action["kind"] == kind and action.get("display") == display, action
+                if any(e.get("label") == "Confirm arrangement" and e.get("is_enabled") for e in data["ui_elements"]): break
+            if time.monotonic() >= deadline: raise AssertionError("Background window could not be restored through the draft.")
+            time.sleep(.1)
+        assert controls(data) == before, "Dragging moved the main controls."
+        assert sum(e.get("label", "").startswith("Preview ") for e in data["ui_elements"]) == 3, "A window disappeared while changing its disposition."
+    return data
+
+
+def cancel_draft(window, data):
+    cancel = next(e for e in data["ui_elements"] if e.get("label") == "Cancel preview")
+    result = subprocess.run(["peekaboo", "click", "--on", cancel["id"], "--snapshot", data["snapshot_id"],
+                             "--input-strategy", "actionOnly", "--json"], capture_output=True, text=True)
+    assert json.loads(result.stdout).get("success")
+    deadline = time.monotonic() + 3
+    while True:
+        current = snapshot(window)
+        elements = current["ui_elements"]
+        if any(e.get("label") == "Arrange windows" for e in elements):
+            assert not any(e.get("label") == "Confirm arrangement" for e in elements)
+            assert sum(e.get("label", "").startswith("Preview ") for e in elements) == 3
+            field = next(e["bounds"] for e in elements if e.get("label") == "Layout instructions")
+            button = next(e["bounds"] for e in elements if e.get("label") == "Arrange windows")
+            assert field["y"] + field["height"] <= button["y"]
+            return
+        if time.monotonic() > deadline: raise AssertionError("Cancel did not return every window to the live preview.")
+        time.sleep(.1)
 
 
 def main():
@@ -74,11 +138,11 @@ def main():
         subprocess.run(["xcrun", "swiftc", "-O", "-D", "FENLET_UI_TEST", "-parse-as-library",
                         *[str(ROOT / "native" / file) for file in ("MenuBar.swift", "WindowPreviews.swift", "DraftEditing.swift", "Brand.swift", "WidgetFixture.swift")],
                         "-o", str(executable), "-framework", "SwiftUI", "-framework", "Security", "-framework", "ScreenCaptureKit"], check=True)
-        cases = [(count, True) for count in args.counts]
-        if 2 in args.counts: cases.append((2, False))
-        for count, allow_portrait in cases:
+        cases = [(count, True, "tiles") for count in args.counts]
+        if 2 in args.counts: cases += [(2, False, "tiles"), (2, False, "background")]
+        for count, allow_portrait, mode in cases:
             path = directory / "input.json"
-            preview = fixture(count, allow_portrait)
+            preview = fixture(count, allow_portrait, mode)
             plan = dict(version=1, id=uuid.uuid4().hex, intent="Synthetic widget test", model=None, **preview["plan"])
             plan_path = directory / "plan.json"; plan_path.write_text(json.dumps(plan))
             preview["plan_path"] = str(plan_path); path.write_text(json.dumps(preview))
@@ -95,25 +159,33 @@ def main():
                 gallery = next(e for e in data["ui_elements"] if e.get("ax_role") == "AXScrollArea")
                 field = before["Layout instructions"]
                 assert gallery["bounds"]["y"] + gallery["bounds"]["height"] <= field["y"], "Gallery overlaps instructions."
+                if mode == "tiles":
+                    for label in ("Preview Music: Background example", "Preview Calendar: Old example"):
+                        item = next((e for e in data["ui_elements"] if e.get("label") == label), None)
+                        assert item, "A non-display action is hidden instead of shown as a thumbnail."
+                        assert item["bounds"]["y"] + item["bounds"]["height"] <= field["y"], "Disposition preview overlaps instructions."
                 if count == 1:
                     source = next(e for e in data["ui_elements"] if e.get("label") == "Preview Terminal: Example 1")
                     target = next(e for e in data["ui_elements"] if e.get("label") == "Preview Safari: Example 2")
-                    drag = subprocess.run(["peekaboo", "drag", "--from", source["id"], "--to", target["id"],
-                                           "--snapshot", data["snapshot_id"], "--duration", "400ms", "--steps", "20", "--json"], capture_output=True, text=True)
-                    receipt = json.loads(drag.stdout)
-                    assert receipt.get("success"), receipt.get("error")
+                    drag(data, source, target)
                     deadline = time.monotonic() + 3
                     while True:
                         data = snapshot(window)
                         changed = next(e for e in data["ui_elements"] if e.get("label") == source["label"])
                         plans = list((directory / "state/plans").glob("*.json"))
-                        if changed["bounds"] == target["bounds"] and len(plans) == 1: break
+                        a, b = changed["bounds"], target["bounds"]
+                        centered = abs(a["x"] + a["width"] / 2 - b["x"] - b["width"] / 2) < 2 and abs(a["y"] + a["height"] / 2 - b["y"] - b["height"] / 2) < 2
+                        ready = any(e.get("label") == "Confirm arrangement" and e.get("is_enabled") for e in data["ui_elements"])
+                        if centered and len(plans) == 1 and ready: break
                         if time.monotonic() >= deadline: raise AssertionError("Tile drag did not save and render the swapped draft.")
                         time.sleep(.1)
                     saved = json.loads(plans[0].read_text())
-                    assert saved["actions"][0]["window"]["id"] == "w-0-1"
+                    assert next(a for a in saved["actions"] if a["kind"] == "move")["window"]["id"] == "w-0-1"
                     assert json.loads(plan_path.read_text()) == plan, "Drag changed the original plan."
                     assert controls(data) == before, "Dragging moved the main controls."
+                if mode == "background":
+                    data = restore_background_window(window, directory, data, before)
+                    assert json.loads(plan_path.read_text()) == plan, "Drag changed the original plan."
                 if count > 2:
                     receipt = subprocess.run(["peekaboo", "scroll", "--on", gallery["id"], "--snapshot", data["snapshot_id"],
                                               "--direction", "down", "--amount", "10", "--json"], capture_output=True, text=True)
@@ -133,11 +205,14 @@ def main():
                         time.sleep(.1)
                 if args.output:
                     args.output.mkdir(parents=True, exist_ok=True)
-                    name = f"widget-{count}" + ("-landscape" if not allow_portrait else "")
+                    name = f"widget-{count}" + ("-landscape" if not allow_portrait else "") + ("-background" if mode == "background" else "")
                     (args.output / f"{name}.json").write_text(json.dumps(data, indent=2))
                     capture = subprocess.run(["peekaboo", "see", "--window-id", str(window), "--path", str(args.output / f"{name}.png"), "--json"], capture_output=True, text=True)
                     assert json.loads(capture.stdout).get("success"), capture.stdout
-                report.append(dict(displays=count, portrait_included=allow_portrait and count > 1, controls_visible=True, controls_pinned=True, last_display_reachable=True, drag_swap_saved=True if count == 1 else None))
+                if mode == "background": cancel_draft(window, data)
+                report.append(dict(displays=count, portrait_included=allow_portrait and count > 1, controls_visible=True, controls_pinned=True,
+                                   dispositions_visible=True, background_drag_restored=mode == "background", cancel_keeps_windows=True if mode == "background" else None,
+                                   last_display_reachable=True, drag_swap_saved=True if count == 1 else None))
             finally:
                 if process.poll() is None: process.terminate()
                 process.wait(timeout=3); process.stdout.close()

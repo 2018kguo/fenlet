@@ -141,6 +141,39 @@ class LayoutTest(unittest.TestCase):
         inv["windows"][0]["bounds"] = a["target"]
         self.assertEqual(build_actions(inv, ds)[0]["target"], a["target"])
 
+    def test_opening_a_draft_preserves_manually_reordered_existing_slots(self):
+        for portrait in (False, True):
+            ws = [window("work", "Rex Beta", focused=True), window("reference", "Safari"), window("video", "Google Chrome")]
+            inv = inventory(ws)
+            inv["displays"] = inv["displays"][:1]
+            if portrait:
+                inv["displays"][0].update(bounds={"x": -1200, "y": 0, "width": 1200, "height": 1920},
+                    usable={"x": -1200, "y": 30, "width": 1200, "height": 1860},
+                    physical_size_mm={"width": 336, "height": 598})
+            ds = [{"id": w["id"], "role": "display_external"} for w in ws]
+            first = build_actions(inv, ds)
+            slots = [a["target"] for a in first]
+            # A user puts their terminal last. CG order and focus don't encode this.
+            expected = {w["id"]: slots[(i + 1) % 3] for i, w in enumerate(ws)}
+            for w in ws: w["bounds"] = {**expected[w["id"]]}
+            ws[0]["bounds"]["height"] -= 6  # A terminal's character-cell height clamp.
+            original = copy.deepcopy(inv)
+            again = build_actions(inv, ds)
+            self.assertEqual({a["window"]["id"]: a["target"] for a in again}, expected)
+            self.assertEqual(inv, original)
+
+    def test_existing_order_does_not_preserve_overlaps_or_outdated_screen_geometry(self):
+        ws = [window(f"w-{i}", focused=i == 0) for i in range(3)]
+        inv = inventory(ws); ds = [{"id": w["id"], "role": "display_external"} for w in ws]
+        first = build_actions(inv, ds)
+        for w, action in zip(ws, reversed(first)): w["bounds"] = dict(action["target"])
+        inv["displays"][0]["usable"]["width"] -= 300
+        changed = build_actions(inv, ds)
+        self.assertTrue(all(a["target"]["width"] < first[0]["target"]["width"] for a in changed))
+        for w in ws: w["bounds"] = dict(ws[0]["bounds"])
+        corrected = build_actions(inv, ds)
+        self.assertFalse(any(frames_overlap(a["target"], b["target"]) for i, a in enumerate(corrected) for b in corrected[i+1:]))
+
     def test_unknown_duplicate_missing_and_injected_actions_refused(self):
         ws = [window(), window("w-2")]
         for ds in [[], [{"id": "w-1", "role": "display_external"}] * 2,

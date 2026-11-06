@@ -108,6 +108,7 @@ enum TidyError: LocalizedError {
     @Published var editingDraft = false
     @Published var draggedWindowID: String?
     private var instructionSaveTask: Task<Void, Never>?
+    private var introducedWindows = Set<String>()
     @Published var journal: String?
     @Published var showingSettings = false
     @Published var onboarding = false
@@ -169,12 +170,14 @@ enum TidyError: LocalizedError {
         + "Additional user preferences take priority: \(settings.customInstructions ?? "")"
     }
     var availableDisplays: [ScreenInfo] { liveInventory?.displays ?? preview?.plan.inventory.displays ?? [] }
-    static func panelHeight(for inventory: InventoryInfo?) -> CGFloat {
+    static func panelHeight(for inventory: InventoryInfo?, draft: Bool) -> CGFloat {
         guard let screens = inventory?.displays, !screens.isEmpty else { return 550 }
-        if screens.count == 1 || screens.count > 2 { return 567 }
-        return screens.contains(where: { $0.bounds.height > $0.bounds.width }) ? 543 : 505
+        let gallery: CGFloat = screens.count == 1 || screens.count > 2 ? 255
+            : screens.contains(where: { $0.bounds.height > $0.bounds.width }) ? 231 : 193
+        return 296 + gallery + (draft ? 104 : 0)
     }
-    var panelHeight: CGFloat { Self.panelHeight(for: liveInventory) }
+    var panelHeight: CGFloat { Self.panelHeight(for: liveInventory, draft: hasLayout) }
+    func claimDraftIntroduction(_ id: String) -> Bool { introducedWindows.insert(id).inserted }
     var hasStalePreview: Bool { !hasLayout && preview?.plan.actions.isEmpty == false }
     var hasDraft: Bool { preview?.plan.actions.isEmpty == false }
     func cancelPreview() { desktopRevision += 1; hasLayout = false; preview = nil; draggedWindowID = nil; draftCursor.position = nil; draftTarget = nil; editingDraft = false; status = "Ready to arrange." }
@@ -198,8 +201,13 @@ enum TidyError: LocalizedError {
         switch destination {
         case .pane(let other):
             guard id != other else { return }
-            if actions.first(where: { $0.id == id })?.kind == "move" { editDraft(["--swap", id, other]) }
-            else if let screen = actions.first(where: { $0.id == other })?.display { editDraft(["--move", id, screen]) }
+            let source = actions.first(where: { $0.id == id }), target = actions.first(where: { $0.id == other })
+            if target?.kind == "move", let display = target?.display {
+                if source?.kind == "move" { editDraft(["--swap", id, other]) }
+                else { editDraft(["--move", id, display]) }
+            } else if let kind = target?.kind, kind == "minimize" || kind == "close" {
+                editDraft(["--" + kind, id])
+            }
         case .display(let display):
             if actions.first(where: { $0.id == id })?.display != display { editDraft(["--move", id, display]) }
         case .disposition(let kind): editDraft(["--" + kind, id])
@@ -234,11 +242,6 @@ enum TidyError: LocalizedError {
     }
     func remember(_ path: String) {
         journal = path
-        do {
-            try FileManager.default.createDirectory(at: history.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            try JSONEncoder().encode(["journal": path]).write(to: history, options: [.atomic])
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: history.path)
-        } catch { self.error = error.localizedDescription }
     }
     static func command(_ args: [String], settings: Settings, input: String? = nil, frontmostPid: pid_t? = nil) async throws -> Data {
         let root = Bundle.main.resourceURL!
@@ -299,6 +302,7 @@ enum TidyError: LocalizedError {
                 if layout {
                     let response = try JSONDecoder().decode(Envelope<PreviewInfo>.self, from: data)
                     guard response.ok, let result = response.data else { throw TidyError.message(response.error ?? "Could not preview.") }
+                    introducedWindows.removeAll()
                     preview = result; inventory = result.plan.inventory; hasLayout = true
                 } else {
                     let response = try JSONDecoder().decode(Envelope<InventoryInfo>.self, from: data)
@@ -307,7 +311,7 @@ enum TidyError: LocalizedError {
                 }
                 liveInventory = inventory; liveReadOK = true
                 if liveTask != nil { windowPreviews.refresh(inventory.windows) }
-                status = layout ? "Drag tiles to adjust. Confirm when it feels right." : "Ready to arrange."
+                status = layout ? "Nothing moves or closes until you confirm." : "Ready to arrange."
             } catch { self.error = error.localizedDescription; status = "Try refreshing your preview." }
         }
     }
@@ -426,6 +430,7 @@ struct WindowThumbnail: View {
 struct WindowTile: View {
     let window: WindowInfo
     var compact = false
+    var editable = false
     @ObservedObject var captures: WindowPreviews
     let inspect: () -> Void
     let hoverChange: (Bool) -> Void
@@ -437,20 +442,30 @@ struct WindowTile: View {
     }
     var body: some View {
         Button(action: inspect) {
-            WindowThumbnail(window: window, captures: captures)
-                .overlay(alignment: .bottomLeading) {
-                    HStack(spacing: 4) {
-                        AppGlyph(name: window.app_name).frame(width: 12, height: 12)
-                        if !compact { Text(window.app_name).font(.system(size: 9, weight: .medium)).lineLimit(1) }
-                    }.padding(.horizontal, 5).padding(.vertical, 3)
-                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 5))
-                        .padding(4)
-                }
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-                .overlay { RoundedRectangle(cornerRadius: 6).strokeBorder(outline, lineWidth: hovered ? 1.5 : 0.5) }
-                .shadow(color: .black.opacity(0.12), radius: 2, y: 1)
+            VStack(spacing: 0) {
+                HStack(spacing: 4) {
+                    AppGlyph(name: window.app_name).frame(width: 12, height: 12)
+                    if !compact {
+                        ViewThatFits(in: .horizontal) {
+                            Text(window.app_name).font(.system(size: 10, weight: .medium)).fixedSize()
+                            Color.clear.frame(width: 0, height: 0)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                    if editable { GrabDots() }
+                    else { Color.clear.frame(width: 8, height: 12).accessibilityHidden(true) }
+                }.padding(.horizontal, 5).frame(height: 20)
+                    .background(.primary.opacity(colorScheme == .dark ? 0.04 : 0.03))
+                WindowThumbnail(window: window, captures: captures)
+            }
+            .background(Color(nsColor: .controlBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 7))
+            .overlay { RoundedRectangle(cornerRadius: 7).strokeBorder(outline, lineWidth: hovered ? 1.5 : 0.5) }
+            .shadow(color: .black.opacity(hovered ? 0.18 : 0.08), radius: hovered ? 4 : 2, y: 1)
+            .overlay { CursorRegion(cursor: editable ? .openHand : .pointingHand).allowsHitTesting(false) }
         }.buttonStyle(.plain).onHover { hovered = $0; hoverChange($0) }
             .accessibilityLabel("Preview " + window.app_name + ": " + window.title)
+            .accessibilityHint(editable ? "Drag to swap panes, move to another display, or change its disposition. Right-click for placement choices." : "Inspect this window")
     }
 }
 
@@ -494,8 +509,8 @@ struct DisplayCard: View {
                 ZStack(alignment: .topLeading) {
                     Color(nsColor: .underPageBackgroundColor).opacity(0.6)
                     ForEach(panes) { pane in
-                        WindowTile(window: pane.window, compact: pane.frame.width * scale < 65, captures: captures, inspect: { show(pane.window) }, hoverChange: { inside in
-                            if inside && store.draggedWindowID == nil { show(pane.window) } else { peek.hide() }
+                        WindowTile(window: pane.window, compact: pane.frame.width * scale < 90, editable: proposed, captures: captures, inspect: { show(pane.window) }, hoverChange: { inside in
+                            if inside && store.draggedWindowID == nil { peek.schedule(pane.window, captures: captures, in: inventory.windows) } else { peek.hide() }
                         })
                             .modifier(DraftTileInteractions(store: store, window: pane.window))
                             .frame(width: max(2, pane.frame.width * scale), height: max(2, pane.frame.height * scale))
@@ -511,8 +526,8 @@ struct DisplayCard: View {
                     .contentShape(Rectangle())
                     .modifier(DraftTargetRegion(kind: .display(screen.id)))
             }.frame(height: single ? 182 : screen.bounds.height > screen.bounds.width ? 148 : 110)
-        }.padding(10).background(.quaternary.opacity(0.2), in: RoundedRectangle(cornerRadius: 12))
-            .overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(store.draftTarget == .display(screen.id) ? Color.accentColor : .primary.opacity(0.06), lineWidth: 1) }
+        }.padding(10).background(.quaternary.opacity(0.2), in: RoundedRectangle(cornerRadius: 17))
+            .overlay { RoundedRectangle(cornerRadius: 17).strokeBorder(store.draftTarget == .display(screen.id) ? Color.accentColor : .primary.opacity(0.06), lineWidth: 1) }
     }
 }
 
@@ -523,7 +538,7 @@ struct DisplayGallery: View {
         if let inventory = store.liveInventory {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    Text(store.hasLayout ? "Proposed layout" : "Your windows").font(.system(size: 11, weight: .medium))
+                    Text(store.hasLayout ? "Drag to edit your layout" : "Your windows").font(.system(size: 11, weight: .medium))
                     Spacer()
                     if !store.hasLayout { Text(store.liveReadOK ? "Live" : "Updating…").font(.system(size: 10)).foregroundStyle(.secondary) }
                 }
@@ -543,7 +558,7 @@ struct DisplayGallery: View {
                         Button("Allow…") { captures.enable(); captures.refresh(inventory.windows) }.controlSize(.small)
                     }
                 } else {
-                    Text(store.hasLayout ? (inventory.displays.count == 1 ? "Drag to swap panes · Right-click for more" : "Drag to swap panes or move between displays") : "Hover a window for a closer look")
+                    Text(store.hasLayout ? "Drag a window to swap, move, or keep it visible" : "Hover a window for a closer look")
                         .font(.system(size: 10)).foregroundStyle(.tertiary)
                 }
             }.frame(maxHeight: .infinity, alignment: .top)
@@ -577,12 +592,12 @@ struct Panel: View {
                 Text("Fenlet").font(.system(size: 16, weight: .semibold))
                 Spacer()
                 if store.hasDraft && !store.showingSettings {
-                    Button("Cancel") { store.windowPeek.hide(); store.cancelPreview() }
-                        .buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(.secondary).disabled(store.busy || store.editingDraft)
+                    Button { store.windowPeek.hide(); store.cancelPreview() } label: { Text("Cancel").frame(minWidth: 52, minHeight: 40).contentShape(Rectangle()) }
+                        .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(.secondary).disabled(store.busy || store.editingDraft)
                         .accessibilityLabel("Cancel preview")
                 }
                 Button { store.windowPeek.hide(); store.showingSettings.toggle() } label: {
-                    Image(systemName: store.showingSettings ? "xmark" : "gearshape").frame(width: 28, height: 28)
+                    Image(systemName: store.showingSettings ? "xmark" : "gearshape").frame(width: 40, height: 40).contentShape(Rectangle())
                 }.buttonStyle(.plain).foregroundStyle(.secondary).accessibilityLabel(store.showingSettings ? "Back to windows" : "Settings")
                     .disabled(store.busy || store.editingDraft)
             }
@@ -624,14 +639,14 @@ struct Panel: View {
                                 do { try store.persist() } catch { store.error = error.localizedDescription }
                             }
                         }
-                    } label: { Label(modelTitle, systemImage: "bolt.fill") }.menuStyle(.borderlessButton).fixedSize().disabled(store.busy || store.editingDraft)
+                    } label: { Label(modelTitle, systemImage: "bolt.fill").frame(minHeight: 40).contentShape(Rectangle()) }.menuStyle(.borderlessButton).fixedSize().disabled(store.busy || store.editingDraft)
                     if let ms = store.preview?.model?.latency_ms { Text(ms == 0 ? "Cached" : String(format: "%.2fs", Double(ms) / 1000)).foregroundStyle(.tertiary).monospacedDigit() }
                     Spacer()
-                    Button { store.windowPeek.hide(); store.undo() } label: { Label("Undo", systemImage: "arrow.uturn.backward") }
+                    Button { store.windowPeek.hide(); store.undo() } label: { Label("Undo", systemImage: "arrow.uturn.backward").frame(minWidth: 60, minHeight: 40).contentShape(Rectangle()) }
                         .buttonStyle(.plain).disabled(store.busy || store.editingDraft || store.journal == nil)
-                    Menu { Button("Quit Fenlet") { NSApp.terminate(nil) } } label: { Image(systemName: "ellipsis").frame(width: 24, height: 22) }
+                    Menu { Button("Quit Fenlet") { NSApp.terminate(nil) } } label: { Image(systemName: "ellipsis").frame(width: 40, height: 40).contentShape(Rectangle()) }
                         .menuStyle(.borderlessButton).fixedSize().accessibilityLabel("More")
-                }.font(.system(size: 10)).foregroundStyle(.secondary).frame(height: 22)
+                }.font(.system(size: 11)).foregroundStyle(.secondary).frame(height: 40)
             }
         }.padding(16).frame(width: 420, height: store.panelHeight).background(Color(nsColor: .windowBackgroundColor))
             .coordinateSpace(name: "fenletDraft")
@@ -770,7 +785,7 @@ struct SettingsPanel: View {
             previewWindow = window; NSApp.activate(ignoringOtherApps: true)
             store.startPreviewUpdates()
         }
-        sizeWatcher = store.$liveInventory.map { Store.panelHeight(for: $0) }.removeDuplicates().sink { [weak self] height in
+        sizeWatcher = store.$liveInventory.combineLatest(store.$hasLayout).map { Store.panelHeight(for: $0.0, draft: $0.1) }.removeDuplicates().sink { [weak self] height in
             guard let self else { return }
             self.popover.contentSize = NSSize(width: 420, height: height)
             if let window = self.previewWindow {

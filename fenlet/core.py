@@ -308,6 +308,32 @@ def pack_regions(windows, regions, screen=None, order=None):
     return packed, pending
 
 
+def preserve_fitting_placements(packed):
+    """Keep occupants in existing valid slots when opening a new draft.
+
+    Slot origins use a 32-point spatial index. The planner's non-overlapping
+    tiles and 6-point gaps bound bucket occupancy; there is no N-by-N scan.
+    A changed screen, overlap, or minimum size falls back to the new partition.
+    """
+    buckets = {}
+    for index, (_, target) in enumerate(packed):
+        key = (math.floor(target["x"] / 32), math.floor(target["y"] / 32))
+        buckets.setdefault(key, []).append(index)
+    assigned, result = set(), []
+    for window, _ in packed:
+        bounds, minimum = window["bounds"], window_minimum(window)
+        bx, by = math.floor(bounds["x"] / 32), math.floor(bounds["y"] / 32)
+        matches = [index for dx in (-1, 0, 1) for dy in (-1, 0, 1)
+                   for index in buckets.get((bx + dx, by + dy), [])
+                   if fits_tile(bounds, packed[index][1])
+                   and all(minimum[k] <= packed[index][1][k] for k in ("width", "height"))]
+        if len(matches) != 1 or matches[0] in assigned:
+            return packed
+        index = matches[0]
+        assigned.add(index); result.append((window, packed[index][1]))
+    return result
+
+
 def build_actions(inventory, decisions, layout_order=None):
     windows = eligible_windows(inventory)
     order = {id: i for i, id in enumerate(layout_order)} if layout_order is not None else None
@@ -334,6 +360,8 @@ def build_actions(inventory, decisions, layout_order=None):
         screen = screens_by_role[role]
         minimum = {axis: min(window_minimum(w)[axis] for w in group) for axis in ("width", "height")}
         packed, overflow_windows = pack_regions(group, free_regions(screen["usable"], fixed, minimum), screen, order)
+        if order is None:
+            packed = preserve_fitting_placements(packed)
         for overflow in overflow_windows:
             if overflow["is_focused"]:
                 raise ValueError("The focused window cannot fit this display. Choose a larger display.")

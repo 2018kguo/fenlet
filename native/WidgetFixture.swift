@@ -9,6 +9,7 @@ import SwiftUI
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
         let store = Store()
+        store.journal = nil
         store.liveInventory = preview.plan.inventory
         store.preview = preview; store.hasLayout = true; store.liveReadOK = true
         store.settings.customInstructions = "Keep my browser beside my terminal. Put chat on another display when there is room."

@@ -7,6 +7,16 @@ import SwiftUI
     private var panel: NSPanel?
     private var host: NSHostingView<PeekCard>?
     private var shownID: String?
+    private var hoverTask: Task<Void, Never>?
+    func schedule(_ window: WindowInfo, captures: WindowPreviews, in windows: [WindowInfo]) {
+        hoverTask?.cancel()
+        hoverTask = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: 250_000_000) } catch { return }
+            guard !Task.isCancelled else { return }
+            captures.prioritize([window], in: windows)
+            self?.show(window, captures: captures)
+        }
+    }
     func show(_ window: WindowInfo, captures: WindowPreviews) {
         if panel == nil {
             let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 336, height: 242), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -33,7 +43,7 @@ import SwiftUI
         guard let window = windows.first(where: { $0.id == id }) else { hide(); return }
         host?.rootView = PeekCard(window: window, captures: captures)
     }
-    func hide() { shownID = nil; panel?.orderOut(nil) }
+    func hide() { hoverTask?.cancel(); hoverTask = nil; shownID = nil; panel?.orderOut(nil) }
     private struct PeekCard: View {
         let window: WindowInfo
         @ObservedObject var captures: WindowPreviews

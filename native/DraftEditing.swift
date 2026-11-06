@@ -37,18 +37,53 @@ struct DraftGhost: View {
         }
     }
 }
+
+struct GrabDots: View {
+    var body: some View {
+        VStack(spacing: 2) {
+            ForEach(0..<3) { _ in
+                HStack(spacing: 2) { Circle().frame(width: 2, height: 2); Circle().frame(width: 2, height: 2) }
+            }
+        }.foregroundStyle(.secondary).frame(width: 8, height: 12).fixedSize().accessibilityHidden(true)
+    }
+}
+/// Cursor rectangles keep hover local to the view without changing app focus.
+struct CursorRegion: NSViewRepresentable {
+    let cursor: NSCursor
+    final class Region: NSView {
+        var cursor: NSCursor = .arrow
+        override func resetCursorRects() { addCursorRect(bounds, cursor: cursor) }
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+    func makeNSView(context: Context) -> Region { let view = Region(); view.cursor = cursor; return view }
+    func updateNSView(_ view: Region, context: Context) {
+        view.cursor = cursor; view.window?.invalidateCursorRects(for: view)
+    }
+}
+
 struct DraftTileInteractions: ViewModifier {
     @ObservedObject var store: Store
     let window: WindowInfo
-    var draggable = true
+    @State private var angle = 0.0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     func body(content: Content) -> some View {
-        if store.hasLayout && !store.editingDraft {
-            content.modifier(DraftTargetRegion(kind: .pane(window.id)))
-                .opacity(store.draggedWindowID == window.id ? 0.45 : 1)
-                .overlay { RoundedRectangle(cornerRadius: 6).strokeBorder(store.draftTarget == .pane(window.id) ? Color.accentColor : .clear, lineWidth: 2) }
+        if store.hasLayout {
+            content.rotationEffect(.degrees(reduceMotion ? 0 : angle))
+                .modifier(DraftTargetRegion(kind: .pane(window.id)))
+                .opacity(store.draggedWindowID == window.id ? 0.4 : 1)
+                .overlay { RoundedRectangle(cornerRadius: 7).strokeBorder(store.draftTarget == .pane(window.id) ? Color.accentColor : .clear, lineWidth: 2) }
                 .highPriorityGesture(DragGesture(minimumDistance: 5, coordinateSpace: .named("fenletDraft"))
-                    .onChanged { value in store.trackDraftDrag(window, at: value.location) }
-                    .onEnded { value in store.finishDraftDrag(window.id, at: value.location) }, including: draggable ? .all : .none)
+                    .onChanged { value in angle = 0; store.trackDraftDrag(window, at: value.location) }
+                    .onEnded { value in store.finishDraftDrag(window.id, at: value.location) }, including: store.editingDraft ? .none : .all)
+                .task {
+                    guard store.claimDraftIntroduction(window.id), !reduceMotion else { return }
+                    // A short edit-mode cue, once per window per draft. No idle loop.
+                    for degrees in [-0.8, 0.8, -0.4, 0] {
+                        guard !Task.isCancelled, store.draggedWindowID == nil else { angle = 0; return }
+                        withAnimation(.easeInOut(duration: 0.1)) { angle = degrees }
+                        do { try await Task.sleep(nanoseconds: 100_000_000) } catch { angle = 0; return }
+                    }
+                }
                 .contextMenu {
                     Menu("Move to display") {
                         ForEach(store.availableDisplays) { display in
@@ -57,50 +92,54 @@ struct DraftTileInteractions: ViewModifier {
                     }
                     Button("Keep in background") { store.editDraft(["--minimize", window.id]) }.disabled(window.is_focused == true)
                     Button("Close window", role: .destructive) { store.editDraft(["--close", window.id]) }.disabled(window.is_focused == true)
-                }
+                }.disabled(store.busy || store.editingDraft)
         } else { content }
     }
 }
 
+/// Every non-display action stays visible in the same drag coordinate space.
 struct DraftTray: View {
     @ObservedObject var store: Store
     let kind: String
-    @State private var expanded = false
     var actions: [ActionInfo] { store.preview?.plan.actions.filter { $0.kind == kind } ?? [] }
+    var title: String { kind == "close" ? "To close" : "To minimize" }
     var body: some View {
-        Button { expanded.toggle() } label: {
-            HStack(spacing: 7) {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 5) {
                 Image(systemName: kind == "close" ? "xmark.rectangle" : "minus.rectangle")
-                Text(kind == "close" ? "Close" : "Background")
+                Text(title)
                 Spacer(minLength: 0)
                 Text("\(actions.count)").monospacedDigit().foregroundStyle(.secondary)
-            }.font(.system(size: 11, weight: .medium)).padding(11)
-                .frame(maxWidth: .infinity).background(.quaternary.opacity(0.2), in: RoundedRectangle(cornerRadius: 9))
-                .contentShape(Rectangle())
-        }.buttonStyle(.plain).accessibilityLabel("\(kind == "close" ? "Close" : "Background"): \(actions.count) windows. Review or drop a window here.")
-            .modifier(DraftTargetRegion(kind: .disposition(kind)))
-            .popover(isPresented: $expanded, arrowEdge: .bottom) {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(kind == "close" ? "Windows to close" : "Keep in the background").font(.system(size: 12, weight: .semibold))
-                    Text("Right-click a window to move it to a display.")
-                        .font(.system(size: 10)).foregroundStyle(.secondary)
-                    if actions.isEmpty { Text("No windows here.").font(.system(size: 11)).foregroundStyle(.secondary) }
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 8) {
-                            ForEach(actions) { action in
-                                HStack(spacing: 8) {
-                                    AppGlyph(name: action.window.app_name)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(action.window.app_name).font(.system(size: 11, weight: .medium))
-                                        Text(action.window.title).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
-                                    }
-                                    Spacer()
-                                }.padding(6).contentShape(Rectangle())
-                                    .modifier(DraftTileInteractions(store: store, window: action.window, draggable: false))
+            }.font(.system(size: 11, weight: .medium))
+            if actions.isEmpty {
+                Text(kind == "close" ? "Drop to close" : "Drop to minimize")
+                    .font(.system(size: 10)).foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView(.horizontal) {
+                    LazyHStack(alignment: .top, spacing: 7) {
+                        ForEach(actions) { action in
+                            VStack(alignment: .leading, spacing: 3) {
+                                WindowTile(window: action.window, compact: true, editable: true, captures: store.windowPreviews,
+                                           inspect: { store.windowPeek.show(action.window, captures: store.windowPreviews) },
+                                           hoverChange: { inside in
+                                    if inside && store.draggedWindowID == nil {
+                                        store.windowPeek.schedule(action.window, captures: store.windowPreviews, in: store.liveInventory?.windows ?? [])
+                                    } else { store.windowPeek.hide() }
+                                }).modifier(DraftTileInteractions(store: store, window: action.window))
+                                    .frame(width: 78, height: 44)
+                                    .accessibilityValue(kind == "close" ? "Will close only after confirmation. Drag to a display to keep visible." : "Will minimize only after confirmation. Drag to a display to keep visible.")
+                                Text(action.window.title.isEmpty ? action.window.app_name : action.window.title)
+                                    .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1).frame(width: 78, alignment: .leading)
                             }
                         }
-                    }.frame(height: min(200, CGFloat(actions.count * 44)))
-                }.padding(14).frame(width: 290)
+                    }.padding(.vertical, 1)
+                }.scrollIndicators(.hidden)
             }
+        }.padding(8).frame(maxWidth: .infinity).frame(height: 94)
+            .background(.quaternary.opacity(0.18), in: RoundedRectangle(cornerRadius: 15))
+            .overlay { RoundedRectangle(cornerRadius: 15).strokeBorder(store.draftTarget == .disposition(kind) ? Color.accentColor : .primary.opacity(0.05), lineWidth: 1) }
+            .modifier(DraftTargetRegion(kind: .disposition(kind)))
+            .accessibilityElement(children: .contain).accessibilityLabel(title + " after confirmation")
     }
 }

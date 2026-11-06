@@ -223,7 +223,7 @@ def apply(path):
             record(f, {"event": "begin", "at": time.time(), "plan_path": str(Path(path).resolve()), "scope": "windows"})
             outcome = apply_window_batch(p, f)
         results = outcome.results
-        return {"journal_path": str(log), "succeeded": sum(r["ok"] for r in results),
+        result = {"journal_path": str(log), "succeeded": sum(r["ok"] for r in results),
                 "undoable": any(a["kind"] != "close" and not r.get("skipped") and not r.get("unchanged") and r.get("after") for a, r in zip(items, results)),
                 "focus_check": outcome.focus_check, "timings": outcome.timings,
                 "failed": sum(not r["ok"] for r in results), "planned": len(items), "results": results,
@@ -232,6 +232,15 @@ def apply(path):
                 "closed": sum(r.get("applied_kind", a["kind"]) == "close" and r["ok"] and not r.get("unchanged") for a, r in zip(items, results)),
                 "minimized": sum(r.get("applied_kind", a["kind"]) == "minimize" and r["ok"] and not r.get("unchanged") for a, r in zip(items, results)),
                 "arranged": sum(r.get("applied_kind", a["kind"]) == "move" and r["ok"] and not r.get("unchanged") for a, r in zip(items, results))}
+        history_path = STATE / "widget-history.json"
+        if result["undoable"] or (result["failed"] == 0 and items):
+            history = json.loads(history_path.read_text()) if history_path.exists() else {}
+            if result["undoable"]:
+                history["journal"] = str(log)
+            if result["failed"] == 0:
+                history["confirmed_journal"] = str(log)
+            replace_private_json(history_path, history)
+        return result
 
 
 def undo(path):
