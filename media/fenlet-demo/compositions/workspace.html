@@ -1,0 +1,148 @@
+<template>
+<style>
+  #root { position: absolute; inset: 0; color: #20232b; font-family: Inter, sans-serif; }
+  .ground { position: absolute; inset: 0; background: #f1f2f5; }
+  .headline { position: absolute; left: 112px; top: 68px; margin: 0; font-size: 66px; line-height: 1.1; font-weight: 600; letter-spacing: -3.3px; }
+  .subline { position: absolute; left: 115px; top: 155px; font-size: 28px; color: #646873; margin: 0; }
+  .final-headline { top: 68px; }
+  .monitor { position: absolute; left: 112px; top: 242px; width: 1260px; height: 708px; border-radius: 22px; background: #20232a; padding: 10px; box-shadow: 0 28px 55px -30px #2c355073, 0 1px 1px #ffffff; }
+  .desktop { position: relative; width: 100%; height: 100%; border-radius: 13px; overflow: hidden; background: linear-gradient(145deg, #b1c9e7 0%, #d3dcf3 45%, #8da8d5 100%); }
+  .wallpaper-curve { position: absolute; left: -200px; top: 250px; width: 1650px; height: 900px; border-radius: 50%; background: #93a5d8; box-shadow: 0 -80px 0 #b5bde8, 0 -160px 0 #d3d4f0; transform: rotate(-28deg); }
+  .desktop-bar { position: absolute; inset: 0 0 auto; height: 27px; padding: 0 13px; display: flex; align-items: center; justify-content: space-between; background: #e5edf3c9; font-size: 12px; font-weight: 600; color: #29384b; z-index: 40; }
+  .bar-left { display: flex; gap: 17px; align-items: center; }
+  .bar-right { display: flex; align-items: center; gap: 14px; }
+  .bar-mark { width: 17px; height: 17px; }
+  .windows { position: absolute; inset: 27px 0 48px; }
+  .laptop { position: absolute; left: 1420px; top: 589px; width: 388px; height: 272px; padding: 8px; border-radius: 16px 16px 7px 7px; background: #242830; box-shadow: 0 25px 45px -25px #2c355070; }
+  .laptop .desktop { border-radius: 8px; background: linear-gradient(135deg,#b8d7df,#93b2cd); }
+  .laptop-base { position: absolute; left: -19px; bottom: -9px; width: 426px; height: 13px; border-radius: 2px 2px 16px 16px; background: linear-gradient(#c5c9cf,#8a909b); }
+  .laptop-base::after { content: ""; display: block; margin: auto; width: 82px; height: 5px; background: #8b929d; border-radius: 0 0 6px 6px; }
+  .laptop .desktop-bar { height: 16px; font-size: 7px; padding: 0 7px; }
+  .laptop .windows { top: 16px; bottom: 8px; }
+  .display-name { position: absolute; left: 112px; top: 200px; font-size: 28px; font-weight: 500; color: #666c77; }
+  .laptop-name { left: 1420px; top: 890px; }
+  .window { position: absolute; left: 0; top: 0; transform-origin: 0 0; overflow: hidden; border-radius: 9px; border: 1px solid #282d3938; background: #fbfbfd; box-shadow: 0 12px 30px -9px #14234160, 0 1px 5px #14234130; }
+  .window-title { display: flex; align-items: center; gap: 9px; height: 31px; padding: 0 11px; background: #f4f4f6; color: #535761; font-size: 11px; font-weight: 500; border-bottom: 1px solid #0000000c; white-space: nowrap; }
+  .window-title > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .lights { display: flex; gap: 5px; flex: none; }
+  .lights i { width: 8px; height: 8px; border-radius: 50%; background: #ff6259; }
+  .lights i:nth-child(2) { background: #ffbd2e; }.lights i:nth-child(3) { background: #29cc42; }
+  .app-icon { width: 17px; height: 17px; object-fit: contain; margin-left: 5px; }
+  .window-body { padding: 23px 25px; height: calc(100% - 31px); overflow: hidden; }
+  .window-body h2 { font-size: 25px; letter-spacing: -.8px; line-height: 1.18; margin: 18px 0 11px; font-weight: 600; }
+  .window-body h3 { font-size: 17px; margin: 29px 0 14px; font-weight: 600; }
+  .window-body p, .window-body li { font-size: 14px; line-height: 1.65; }
+  .muted { color: #727884; }.crumb { font-size: 12px; color: #808694; }
+  .document-rule { height: 1px; background: #e4e6ec; margin: 24px 0; }
+  .checkline { display: flex; gap: 10px; margin: 13px 0; font-size: 14px; line-height: 1.4; }
+  .checkline b { color: #3f9372; }
+  .note-callout { background: #eaf2ed; color: #365a48; border-radius: 7px; padding: 16px; font-size: 13px; line-height: 1.7; margin-top: 22px; }
+  .terminal { background: #141d29; border-color: #8194b438; color: #d8e2ee; }
+  .terminal .window-title { background: #202b3a; color: #c4cfdf; border-color: #ffffff0c; }
+  .terminal .window-body { padding: 24px 21px; }
+  .terminal pre { font-family: 'IBM Plex Mono', monospace; font-size: 13px; line-height: 1.95; white-space: pre-wrap; margin: 0; }
+  .green { color: #82d5b2; }.blue { color: #90bcf8; }.dim { color: #92a4ba; }
+  .code { background: #202331; color: #d4d7e7; }.code .window-title { background: #2a2e3e; color: #c4c8d9; }
+  .code pre { font-family: 'IBM Plex Mono', monospace; font-size: 12px; line-height: 2; margin: 0; white-space: pre-wrap; }
+  .code .window-body { padding: 24px 19px; }.code .keyword { color: #c7a5ef; }.code .string { color: #a9d3ad; }.code .comment { color: #909aae; }
+  .code-tabs { font-size: 12px; background: #303447; padding: 10px 20px; margin: -24px -19px 20px; color: #a6bbf5; border-bottom: 1px solid #525b77; }
+  .chat .window-body { padding: 18px; background: #fafafa; }.chat h2 { margin: 0 0 19px; font-size: 17px; }
+  .chat-date { text-align: center; font-size: 10px; color: #969ca5; margin-bottom: 19px; }
+  .bubble { padding: 11px 13px; border-radius: 13px 13px 13px 3px; background: #e9e9ed; font-size: 12px; line-height: 1.45; max-width: 91%; margin-bottom: 12px; }
+  .bubble.me { color: white; background: #3484f5; margin-left: auto; border-radius: 13px 13px 3px 13px; }
+  .bubble b { display: block; font-size: 10px; color: #5a687b; margin-bottom: 4px; }.message-field { border: 1px solid #d9dce1; border-radius: 20px; padding: 9px 13px; margin-top: 22px; font-size: 11px; color: #959ba4; }
+  .music .window-body { display: flex; align-items: center; flex-direction: column; background: #181822; color: #fff; padding: 20px; }
+  .album { width: 130px; height: 125px; border-radius: 8px; background: linear-gradient(150deg,#e9d0b4,#b6bdc7 48%,#6a7c8b); position: relative; overflow: hidden; box-shadow: 0 7px 12px #0004; }
+  .album::before { content: ""; position: absolute; width: 180px; height: 90px; background: #b78075; border-radius: 50%; left: -20px; top: 85px; transform: rotate(-20deg); }
+  .album::after { content: ""; position: absolute; height: 90px; width: 7px; background: #4e5f6d; left: 85px; top: 40px; transform: rotate(24deg); }
+  .music h2 { font-size: 19px; margin: 15px 0 3px; }.music p { font-size: 12px; margin: 0; color: #aaaabb; }.playback { margin-top: 14px; font-size: 21px; letter-spacing: 15px; }
+  .scratch .window-body { background: #fffbea; }.scratch h2 { font-size: 22px; }.scratch p { color: #77715f; }
+  .newtab .window-body { display: flex; align-items: center; flex-direction: column; padding-top: 65px; background: #f7f7fa; }.newtab h2 { color: #687182; font-size: 30px; }.search { background: #e6e8ef; color: #8c94a0; padding: 14px 24px; border-radius: 12px; width: 85%; font-size: 13px; }
+  .calendar .day { font-size: 45px; font-weight: 300; margin: 6px 0 14px; }.calendar .event { border-left: 3px solid #b197d6; padding: 8px 12px; margin: 11px 0; font-size: 12px; background: #f1edf7; border-radius: 3px; }
+  .reference .window-body { padding: 15px 19px; }.reference h2 { font-size: 19px; margin-top: 10px; }.reference .shortcut { display: flex; justify-content: space-between; font-size: 12px; padding: 13px 0; border-bottom: 1px solid #edf0f4; }
+  .laptop .window-title { height: 19px; font-size: 8px; padding: 0 6px; gap: 5px; }
+  .laptop .lights { gap: 3px; }.laptop .lights i { width: 5px; height: 5px; }.laptop .app-icon { width: 11px; height: 11px; margin-left: 0; }
+  .laptop .window-body { height: calc(100% - 19px); padding: 10px 11px; }
+  .laptop .window-body h2 { font-size: 13px; margin: 0 0 10px; }.laptop .crumb { font-size: 8px; margin-bottom: 7px; }
+  .laptop .chat-date { font-size: 8px; margin-bottom: 9px; }.laptop .bubble { font-size: 9px; padding: 7px 8px; margin-bottom: 7px; }.laptop .bubble b { font-size: 8px; }
+  .laptop .message-field { padding: 6px 9px; margin-top: 9px; font-size: 8px; }.laptop .shortcut { font-size: 9px; padding: 10px 0; }
+  .laptop .calendar .day { font-size: 25px; margin: 3px 0 8px; }.laptop .calendar .event { font-size: 9px; padding: 5px; margin: 6px 0; }
+  .dock { position: absolute; left: 330px; bottom: 5px; height: 40px; display: flex; gap: 9px; padding: 5px 12px; border: 1px solid #ffffff90; border-radius: 11px; background: #e7edfb96; z-index: 50; }
+  .dock img { width: 29px; height: 29px; }
+  .widget { position: absolute; left: 984px; top: 180px; width: 840px; height: 814px; overflow: hidden; border-radius: 23px; background: #202020; z-index: 100; box-shadow: 0 24px 80px #263b6150, 0 0 0 1px #ffffff80; }
+  .widget img { position: relative; top: -180px; display: block; width: 840px; height: auto; }
+  #widget-live img { top: -100px; }
+  .widget-caption { position: absolute; left: 1394px; top: 142px; margin: 0; font-size: 28px; font-weight: 500; }
+  .result { position: absolute; left: 112px; top: 980px; display: flex; gap: 28px; align-items: center; font-size: 28px; color: #59616f; }
+  .result strong { color: #2b6650; font-weight: 500; }
+  .brand { position: absolute; left: 1420px; top: 932px; display: flex; align-items: center; gap: 8px; font-size: 48px; font-weight: 600; letter-spacing: -1px; }
+  .brand img { width: 60px; height: 60px; }.repo { position: absolute; left: 1420px; top: 994px; font-size: 28px; color: #656d7a; }
+  .cursor { position: absolute; left: 0; top: 0; width: 80px; height: 80px; z-index: 130; pointer-events: none; filter: drop-shadow(0 4px 5px #0006); transform-origin: 17px 10px; }
+  .click-ring { position: absolute; left: 0; top: 0; width: 66px; height: 66px; border-radius: 50%; border: 3px solid #99bfff; z-index: 129; }
+</style>
+<div id="root" data-composition-id="workspace" data-width="1920" data-height="1080" data-duration="12">
+  <div class="ground"></div>
+  <div id="intro-copy" class="clip" data-start="0" data-duration="7" data-track-index="1">
+    <h1 class="headline" data-var-text="headline">A clearer desktop. A clearer head.</h1>
+    <p class="subline">Make room for the work you actually want to do.</p>
+  </div>
+  <div id="outcome-copy" class="clip" data-start="7" data-duration="5" data-track-index="1" data-beat="The workspace is arranged">
+    <h1 class="headline final-headline">Everything in its right place.</h1>
+    <p class="subline">Your work together. The rest, out of the way.</p>
+  </div>
+  <div id="desktop-scene" class="clip" data-start="0" data-duration="12" data-track-index="2" data-beat="Nine overlapping windows">
+    <div class="monitor">
+      <div class="desktop">
+        <div class="wallpaper-curve" data-layout-ignore></div>
+      <div class="desktop-bar" data-layout-ignore><div class="bar-left"><span>●</span><span>Finder</span><span>File</span><span>Edit</span><span>View</span></div><div class="bar-right"><span>◉</span><span>⌕</span><img class="bar-mark" src="assets/fenlet.svg" alt="Fenlet"></div></div>
+        <div id="work-windows" class="windows">@@WORK_WINDOWS@@</div>
+        <div class="dock">@@DOCK@@</div>
+      </div>
+    </div>
+    <div class="laptop">
+      <div class="desktop">
+        <div class="desktop-bar" data-layout-ignore><span>Finder</span><span>◉　⌕</span></div>
+        <div id="laptop-windows" class="windows">@@LAPTOP_WINDOWS@@</div>
+      </div>
+      <div class="laptop-base" data-layout-ignore></div>
+    </div>
+    <div class="display-name">Work display</div>
+    <div id="laptop-label" class="display-name laptop-name">Laptop</div>
+  </div>
+  <div id="widget-stage" class="clip" data-start="1.5" data-duration="5.6" data-track-index="4" data-beat="Review before anything moves" data-layout-allow-occlusion>
+    <div id="widget-live" class="widget" data-layout-allow-overflow><img src="assets/widget-live.png" alt="The real Fenlet widget with the Arrange windows button"></div>
+    <div id="widget-draft" class="widget" data-layout-allow-overflow><img src="assets/widget-draft.png" alt="The real editable preview and Confirm arrangement button"></div>
+    <p id="review-label" class="widget-caption">A quick look. Then go.</p>
+  </div>
+  <div id="cursor-layer" class="clip" data-start="1.7" data-duration="5.1" data-track-index="5" data-layout-ignore>
+    <div id="pointer" class="cursor"><svg viewBox="0 0 24 24"><path fill="white" stroke="#20232b" stroke-width="1.1" stroke-linejoin="round" d="M5 3 L5 19 L9 15 L12 22 L15 20.5 L11.5 14 L18 14 Z"/></svg></div>
+    <div id="press-one" class="click-ring"></div><div id="press-two" class="click-ring"></div>
+  </div>
+  <div id="result-line" class="clip" data-start="7.8" data-duration="4.2" data-track-index="6" data-hold>
+    <div class="result"><strong>✓ No overlaps</strong><span>5 arranged</span><span>2 minimized</span><span>2 closed</span></div>
+  </div>
+  <div id="end-brand" class="clip" data-start="8.8" data-duration="3.2" data-track-index="6" data-hold>
+    <div class="brand"><img src="assets/fenlet.svg" alt=""><span>Fenlet</span></div>
+    <div class="repo">github.com/2018kguo/fenlet</div>
+  </div>
+</div>
+<script>
+  const tl = gsap.timeline({ paused: true });
+  tl.fromTo('#widget-live', {opacity: 0, y: 15, scale: .98}, {opacity: 1, y: 0, scale: 1, duration: .25, ease: 'power3.out'}, 1.5);
+  tl.fromTo('#review-label', {opacity: 0}, {opacity: 1, duration: .2}, 1.7);
+  tl.fromTo('#widget-draft', {opacity: 0}, {opacity: 0, duration: .1}, 0);
+  tl.to('#widget-live', {opacity: 0, duration: .12}, 3.15);
+  tl.to('#widget-draft', {opacity: 1, duration: .18}, 3.15);
+  tl.to(['#widget-live','#widget-draft','#review-label'], {opacity: 0, y: -8, duration: .2, ease: 'power2.in'}, 6.8);
+  tl.to('#laptop-label', {opacity: 0,duration: .15}, 1.5);
+  tl.to('#laptop-label', {opacity: 1,duration: .2}, 7.1);
+  @@WINDOW_TWEENS@@
+  @@CURSOR_TWEENS@@
+  tl.fromTo('#outcome-copy h1', {opacity: 0, y: 10}, {opacity: 1, y: 0, duration: .4, ease: 'power3.out'}, 7);
+  tl.fromTo('#outcome-copy p', {opacity: 0, y: 5}, {opacity: 1, y: 0, duration: .3}, 7.15);
+  tl.fromTo('#result-line .result', {opacity: 0, y: 6}, {opacity: 1, y: 0, duration: .3}, 7.8);
+  tl.fromTo('#end-brand .brand', {opacity: 0, x: -10}, {opacity: 1, x: 0, duration: .35, ease: 'power3.out'}, 8.8);
+  tl.fromTo('#end-brand .repo', {opacity: 0}, {opacity: 1, duration: .25}, 9);
+  window.__timelines['workspace'] = tl;
+</script>
+</template>

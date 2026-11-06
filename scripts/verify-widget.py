@@ -24,11 +24,14 @@ def build_fixture(executable):
 
 
 def snapshot(window):
-    result = subprocess.run(["peekaboo", "see", "--window-id", str(window), "--tree", "--no-screenshot", "--json"], capture_output=True, text=True)
-    response = json.loads(result.stdout)
-    if not response.get("success"):
-        raise RuntimeError(response.get("error"))
-    return response["data"]
+    # SwiftUI can settle its AX receipt while a new fixture is opening. These
+    # retries only observe; a delivered gesture is never repeated here.
+    for attempt in range(3):
+        result = subprocess.run(["peekaboo", "see", "--window-id", str(window), "--tree", "--no-screenshot", "--json"], capture_output=True, text=True)
+        response = json.loads(result.stdout)
+        if response.get("success"): return response["data"]
+        if attempt < 2: time.sleep(.1)
+    raise RuntimeError(response.get("error"))
 
 
 def controls(data):

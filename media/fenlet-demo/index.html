@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en" data-composition-variables='[{"id":"headline","type":"string","label":"Opening headline","default":"A clearer desktop. A clearer head."}]'>
+<head>
+  <meta charset="utf-8">
+  <title>Fenlet — a little room to think</title>
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.15.0/dist/gsap.min.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 1920px; height: 1080px; overflow: hidden; background: #f1f2f5; }
+    #root { position: relative; width: 100%; height: 100%; }
+  </style>
+</head>
+<body>
+  <div id="root" data-composition-id="main" data-start="0" data-duration="12" data-width="1920" data-height="1080">
+    <div id="workspace" class="clip" data-composition-id="workspace" data-composition-src="compositions/workspace.html" data-start="0" data-duration="12" data-track-index="0" data-track-kind="graphics" data-width="1920" data-height="1080"></div>
+  </div>
+  <script>window.__timelines = { main: gsap.timeline({ paused: true }) };</script>
+</body>
+</html>

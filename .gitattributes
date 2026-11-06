@@ -1,3 +1,4 @@
 vendor/** linguist-vendored -whitespace
 docs/*.png binary
 docs/*.gif binary
+docs/*.mp4 binary

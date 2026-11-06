@@ -394,9 +394,17 @@ enum TidyError: LocalizedError {
 
 struct AppGlyph: View {
     let name: String
+    private var icon: NSImage? {
+        if let running = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == name })?.icon { return running }
+        #if FENLET_UI_TEST
+        return DemoWindows.appIcon(name)
+        #else
+        return nil
+        #endif
+    }
     var body: some View {
         Group {
-            if let icon = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == name })?.icon {
+            if let icon {
                 Image(nsImage: icon).resizable().aspectRatio(contentMode: .fit)
             } else { Image(systemName: "app.fill").resizable().aspectRatio(contentMode: .fit).foregroundStyle(.secondary) }
         }.frame(width: 16, height: 16)

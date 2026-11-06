@@ -39,11 +39,16 @@ python3 scripts/demo.py
 
 The widget check exercises real drag gestures against synthetic plans, including
 background restoration, filled action trays, and Cancel. It checks 1, 2, 4,
-and 6 displays, including portrait. The demo renders the production widget
-with generated example window images; its command wrapper refuses OS effects
-and model calls. Only its own fixture window is captured. `--output DIR`
-keeps demo assets outside `docs` when experimenting. `ffmpeg` creates the GIF.
-These fixtures are not included in the installed app.
+and 6 displays, including portrait.
+
+The [desktop demo](../media/fenlet-demo/README.md) uses the real planner and
+captures the production widget with fictional content. The surrounding desktop
+is illustrated, and the animation demonstrates the workflow rather than latency.
+Its command wrapper refuses OS effects and model calls. Only its own fixture
+windows are captured. Node 22+, HyperFrames, and FFmpeg render the MP4, GIF, and
+poster. `--prepare-only` builds an editable project under `build/fenlet-demo`;
+`--render-only` preserves edits in that project. `--output DIR` keeps exports
+outside `docs`. These tools and fixtures are not included in the installed app.
 
 `--preview-window` opens a development window; `--show` opens the normal
 menu-bar popover once. Neither flag applies a layout.

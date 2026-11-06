@@ -1,0 +1,9 @@
+{
+  "name": "fenlet-demo",
+  "private": true,
+  "scripts": {
+    "preview": "npx --yes hyperframes@0.9.19 preview --background",
+    "check": "npx --yes hyperframes@0.9.19 check",
+    "render": "npx --yes hyperframes@0.9.19 render"
+  }
+}

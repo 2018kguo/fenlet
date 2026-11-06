@@ -16,8 +16,8 @@ A small native widget, a CLI, and an agent skill share the same planner.
 Click **Arrange windows**, adjust the draft by dragging tiles, then
 **Confirm arrangement**. Nothing moves or closes before confirmation.
 
-<p align="center"><img src="docs/demo.gif" width="420" alt="Fenlet's native widget: drag a background music window onto the laptop display before confirming."></p>
-<p align="center"><sub>Demo uses synthetic windows and example content. Real window images stay on your Mac.</sub></p>
+<p align="center"><a href="docs/demo.mp4"><img src="docs/demo.gif" width="1100" alt="Nine overlapping windows become a focused workspace: browser beside terminal on the work display, chat and references on the laptop, and clutter out of the way."></a></p>
+<p align="center"><sub>Arrange. Review. Back to work. <a href="docs/demo.mp4">Watch in full quality</a>.<br>Illustrated desktop with the real Fenlet widget and planner. Example content; timing is illustrative.</sub></p>
 
 ## Get started
 
