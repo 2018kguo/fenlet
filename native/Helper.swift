@@ -3,20 +3,14 @@ import Foundation
 import Darwin
 import Security
 
+// Keep the installed OS/Keychain identity stable across the Fenlet rename.
+
 // Cocoa must enter multithreaded mode before AX work runs on dispatch workers.
 // A dispatch queue alone does not establish this AppKit runtime condition.
 if !Thread.isMultiThreaded() {
     let bootstrap = Thread {}
     bootstrap.start()
     while !bootstrap.isFinished { Thread.sleep(forTimeInterval: 0.001) }
-}
-
-struct FileFingerprint: Decodable {
-    let device, inode, size, mtime_ns: Int64
-}
-struct TrashRequest: Decodable {
-    let path: String
-    let fingerprint: FileFingerprint
 }
 
 struct WindowRef: Decodable {
@@ -388,7 +382,19 @@ func displays() -> [[String: Any]] {
         let id = (s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as! NSNumber).uint32Value
         let uuid = CGDisplayCreateUUIDFromDisplayID(id)?.takeRetainedValue()
         let stableID = uuid.map { CFUUIDCreateString(nil, $0) as String } ?? "cg-\(id)"
+        var mm = CGDisplayScreenSize(id)
+        if mm.width > 0, mm.height > 0 {
+            let aspect = s.frame.width / s.frame.height
+            if abs(log(mm.height / mm.width / aspect)) < abs(log(mm.width / mm.height / aspect)) {
+                mm = CGSize(width: mm.height, height: mm.width)
+            }
+        }
+        // Quartz can synthesize 72-DPI dimensions when EDID is absent.
+        let estimated = abs(mm.width - s.frame.width * 25.4 / 72) < 1 && abs(mm.height - s.frame.height * 25.4 / 72) < 1
+        let known = !estimated && mm.width.isFinite && mm.height.isFinite && mm.width > 0 && mm.height > 0
         return ["id": stableID, "name": s.localizedName, "built_in": CGDisplayIsBuiltin(id) != 0,
+                "physical_size_mm": known ? ["width": mm.width, "height": mm.height] as Any : NSNull(),
+                "physical_size_source": known ? "system_reported" : "estimated",
                 "bounds": rect(s.frame, top), "usable": rect(s.visibleFrame, top)]
     }
 }
@@ -424,7 +430,7 @@ func inventoryData(entries: [[String: Any]], focus: [String: Any]) -> [String: A
 }
 
 func inventory() {
-    guard AXIsProcessTrusted() else { output(["ok": false, "error": "Allow Desk Tidy in System Settings → Privacy & Security → Accessibility."]); return }
+    guard AXIsProcessTrusted() else { output(["ok": false, "error": "Allow Fenlet in System Settings → Privacy & Security → Accessibility."]); return }
     guard let entries = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
         output(["ok": false, "error": "The current screen inventory is unavailable."]); return
     }
@@ -494,25 +500,7 @@ if CommandLine.arguments.dropFirst().first == "session" {
         }
         output(["ok": status == errSecSuccess, "data": ["saved": status == errSecSuccess]])
     } catch { output(["ok": false, "error": "Could not read the API key."]) }
-} else if CommandLine.arguments.dropFirst().first == "trash" {
-    while let line = readLine() {
-        do {
-            let request = try JSONDecoder().decode(TrashRequest.self, from: Data(line.utf8))
-            let path = request.path
-            let expected = request.fingerprint
-            var s = stat()
-            guard lstat(path, &s) == 0, (s.st_mode & S_IFMT) == S_IFREG,
-                  Int64(s.st_dev) == expected.device,
-                  Int64(s.st_ino) == expected.inode,
-                  Int64(s.st_size) == expected.size,
-                  Int64(s.st_mtimespec.tv_sec) * 1_000_000_000 + Int64(s.st_mtimespec.tv_nsec) == expected.mtime_ns
-            else { output(["ok": false, "error": "File changed since preview. Scan again."]); continue }
-            var trashed: NSURL?
-            try FileManager.default.trashItem(at: URL(fileURLWithPath: path), resultingItemURL: &trashed)
-            output(["ok": true, "trashed_path": trashed!.path!])
-        } catch { output(["ok": false, "error": error.localizedDescription]) }
-    }
-} else {
-    fputs("Usage: desktop-helper displays | trash (JSON lines on stdin)\n", stderr)
+ } else {
+    fputs("Usage: desktop-helper session | inventory | windows | focus | permissions\n", stderr)
     exit(2)
 }

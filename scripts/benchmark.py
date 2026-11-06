@@ -8,7 +8,7 @@ import sys
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from desk_tidy.runtime import STATE, decide, load_env, write_json
+from fenlet.runtime import STATE, decide, load_env, write_json
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--env-file")

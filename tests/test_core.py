@@ -1,7 +1,7 @@
 import copy
 import unittest
 
-from desk_tidy.core import build_actions, same_bounds, validate_decisions, eligible_windows, tile_frames, frames_overlap, constrained_tiles, snap_frame, display_assignments, screen_key
+from fenlet.core import build_actions, same_bounds, validate_decisions, eligible_windows, tile_frames, frames_overlap, constrained_tiles, snap_frame, display_assignments, screen_key
 
 
 def window(id="w-1", app="Terminal", focused=False, x=10):

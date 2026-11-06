@@ -1,6 +1,5 @@
 """Desktop decisions. No GUI, network, or filesystem effects in this module."""
 import math
-import re
 from .overlap import analyze_overlaps
 
 WINDOW_EFFECTS = ("close", "minimize", "unchanged")
@@ -21,19 +20,14 @@ DEFAULT_INTENT = (
     "Minimize useful background documents and tools. Actually close useless "
     "idle launchers, extra folder windows, old sign-in windows and unwanted media."
 )
-# Leaf recognizer for macOS's default screenshot names; never read image contents.
-SCREENSHOT = re.compile(r"(?:Screenshot|Screen Shot) \d{4}-\d{2}-\d{2} at .+\.png", re.I)
 
 
 def eligible_windows(inventory):
     # Test browsers can belong to another automation run. Leave them alone.
     return [w for w in inventory["windows"] if not w.get("minimized") and not w.get("hidden") and not w.get("protected") and w.get("accessible", True)
-            and w["app_name"] not in ("Desk Tidy", "Google Chrome for Testing")]
+            and w["app_name"] not in ("Fenlet", "Google Chrome for Testing")]
 
 
-def fingerprint(stat):
-    return {"device": stat.st_dev, "inode": stat.st_ino,
-            "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
 
 
 def same_bounds(a, b, tolerance=3):
@@ -51,7 +45,12 @@ def screen_key(screen):
 
 
 def display_assignments(inventory):
-    screens = sorted(inventory["displays"], key=lambda s: s["usable"]["width"] * s["usable"]["height"], reverse=True)
+    screens = inventory["displays"]
+    physical = {s["id"]: physical_size(s) for s in screens}
+    if screens and all(physical.values()):
+        screens = sorted(screens, key=lambda s: physical[s["id"]]["width"] * physical[s["id"]]["height"], reverse=True)
+    else:
+        screens = sorted(screens, key=lambda s: s["usable"]["width"] * s["usable"]["height"], reverse=True)
     if not screens:
         raise ValueError("No usable display is connected. Connect or wake a display, then scan again.")
     preferences = inventory.get("display_preferences", {})
@@ -142,53 +141,114 @@ def window_minimum(window):
     return limits
 
 
-def constrained_tiles(windows, usable):
-    """Try only row counts that can physically fit readable panes.
+def physical_size(screen):
+    """OS-reported, orientation-aligned millimeters; unknown is never inches."""
+    if not screen or screen.get("physical_size_source") == "estimated":
+        return None
+    size, bounds = screen.get("physical_size_mm"), screen.get("bounds", screen.get("usable"))
+    if not size or not bounds or any(type(size.get(k)) not in (int, float) or not math.isfinite(size[k]) or size[k] <= 0 for k in ("width", "height")):
+        return None
+    width, height = size["width"], size["height"]
+    aspect = bounds["width"] / bounds["height"]
+    if abs(math.log(height / width / aspect)) < abs(math.log(width / height / aspect)):
+        width, height = height, width
+    return {"width": width, "height": height}
 
-    Width prefix sums reject impossible rows before allocating frames. Search
-    depends on screen capacity, rather than the total number of open windows.
+
+def _spread(minimums, total):
+    """Equal shares subject to lower bounds, in O(K log K)."""
+    available = total - PANE_GAP * (len(minimums) + 1)
+    if available < sum(minimums):
+        return None
+    result = [0] * len(minimums)
+    ordered = sorted(enumerate(minimums), key=lambda pair: pair[1], reverse=True)
+    for offset, (index, limit) in enumerate(ordered):
+        share = available / (len(minimums) - offset)
+        if limit <= share:
+            for i, _ in ordered[offset:]:
+                result[i] = share
+            break
+        result[index] = limit
+        available -= limit
+    return result
+
+
+def _strip_tiles(windows, usable, strips, vertical):
+    """Partition rows or columns; no empty grid cells or overlapping frames."""
+    base, extra = divmod(len(windows), strips)
+    counts = [base + (i >= strips - extra if vertical else i < extra) for i in range(strips)]
+    groups, offset = [], 0
+    for count in counts:
+        groups.append(list(range(offset, offset + count))); offset += count
+    outer, inner = ("width", "height") if vertical else ("height", "width")
+    mins = [window_minimum(w) for w in windows]
+    outer_sizes = _spread([max(mins[i][outer] for i in g) for g in groups], usable[outer])
+    if outer_sizes is None:
+        return None
+    frames = [None] * len(windows)
+    position = usable["x" if vertical else "y"] + PANE_GAP
+    for group, outer_size in zip(groups, outer_sizes):
+        sizes = _spread([mins[i][inner] for i in group], usable[inner])
+        if sizes is None:
+            return None
+        cursor = usable["y" if vertical else "x"] + PANE_GAP
+        for index, size in zip(group, sizes):
+            x, y, width, height = (position, cursor, outer_size, size) if vertical else (cursor, position, size, outer_size)
+            frame = {"x": round(x), "y": round(y), "width": math.floor(width), "height": math.floor(height)}
+            if windows[index].get("resizable") is False:
+                frame.update(width=windows[index]["bounds"]["width"], height=windows[index]["bounds"]["height"])
+            frames[index] = frame
+            cursor += size + PANE_GAP
+        position += outer_size + PANE_GAP
+    return frames
+
+
+def _physical_layout_score(windows, frames, screen, size):
+    bounds = screen.get("bounds", screen["usable"])
+    inches_per_point = {k: size[k] / 25.4 / bounds[k] for k in ("width", "height")}
+    score = 0
+    for window, frame in zip(windows, frames):
+        width, height = (frame[k] * inches_per_point[k] for k in ("width", "height"))
+        if preferred_aspect(window) > 1:
+            score += abs(math.log(width / height / preferred_aspect(window)))
+        else:
+            narrow = max(0, (6 - width) / 6)
+            score += 9 * narrow + 30 * narrow * narrow
+            score += .3 * max(0, (width - 8) / 8) + .2 * abs(math.log(width / 7))
+            score += .5 * max(0, width / height - .85) + .05 * max(0, height / width - 3)
+    return score / len(windows)
+
+
+def constrained_tiles(windows, usable, screen=None):
+    """Search strip counts bounded by screen capacity, not subsets of N windows.
+
+    Known physical sizes prefer 6–8 inch reading widths (7 ideal). Portrait
+    screens may stack panes; native minimums and finite screen area still win.
+    Unknown size keeps the point-based tall-column preference.
     """
     if not windows:
         return []
-    gap, choices = PANE_GAP, []
     minimums = [window_minimum(w) for w in windows]
-    max_rows = max(0, min(len(windows), math.floor((usable["height"] - gap) / (min(m["height"] for m in minimums) + gap))))
-    max_columns = max(0, math.floor((usable["width"] - gap) / (min(m["width"] for m in minimums) + gap)))
-    if not max_columns or len(windows) > max_rows * max_columns:
+    max_rows = max(0, min(len(windows), math.floor((usable["height"] - PANE_GAP) / (min(m["height"] for m in minimums) + PANE_GAP))))
+    max_columns = max(0, min(len(windows), math.floor((usable["width"] - PANE_GAP) / (min(m["width"] for m in minimums) + PANE_GAP))))
+    if not max_columns or not max_rows or len(windows) > max_rows * max_columns:
         return None
-    prefix_widths = [0]
-    for m in minimums:
-        prefix_widths.append(prefix_widths[-1] + m["width"])
+    size, choices = physical_size(screen), []
+    axes = [(True, math.ceil(len(windows) / max_rows), max_columns)] if size else []
+    axes.append((False, math.ceil(len(windows) / max_columns), max_rows))
     tall = all(preferred_aspect(w) < 1 for w in windows)
-    for rows in range(math.ceil(len(windows) / max_columns), max_rows + 1):
-        groups, remaining, offset = [], len(windows), 0
-        for row in range(rows):
-            size = math.ceil(remaining / (rows - row))
-            groups.append((offset, offset + size))
-            offset += size
-            remaining -= size
-        if any(prefix_widths[b] - prefix_widths[a] + gap * (b - a + 1) > usable["width"] for a, b in groups):
-            continue
-        heights = [max(minimums[i]["height"] for i in range(a, b)) for a, b in groups]
-        slack_y = usable["height"] - gap * (rows + 1) - sum(heights)
-        if slack_y < 0:
-            continue
-        frames, y = [], usable["y"] + gap
-        for (a, b), minimum_height in zip(groups, heights):
-            slack_x = usable["width"] - gap * (b - a + 1) - (prefix_widths[b] - prefix_widths[a])
-            height, x = minimum_height + slack_y / rows, usable["x"] + gap
-            for i in range(a, b):
-                width = minimums[i]["width"] + slack_x / (b - a)
-                frame = {"x": round(x), "y": round(y), "width": math.floor(width), "height": math.floor(height)}
-                if windows[i].get("resizable") is False:
-                    frame.update(width=windows[i]["bounds"]["width"], height=windows[i]["bounds"]["height"])
-                frames.append(frame)
-                x += width + gap
-            y += height + gap
-        if tall:
-            return frames
-        score = sum(abs(math.log(f["width"] / f["height"] / preferred_aspect(w))) for w, f in zip(windows, frames))
-        choices.append((score, frames))
+    for vertical, first, last in axes:
+        for strips in range(first, last + 1):
+            frames = _strip_tiles(windows, usable, strips, vertical)
+            if frames is None:
+                continue
+            if size:
+                score = _physical_layout_score(windows, frames, screen, size)
+            elif tall:
+                return frames
+            else:
+                score = sum(abs(math.log(f["width"] / f["height"] / preferred_aspect(w))) for w, f in zip(windows, frames))
+            choices.append((score, frames))
     return min(choices, key=lambda item: item[0])[1] if choices else None
 
 
@@ -227,7 +287,7 @@ def free_regions(usable, fixed, minimum=None):
     return sorted(regions, key=lambda r: (r["height"], r["width"] * r["height"]), reverse=True)
 
 
-def pack_regions(windows, regions):
+def pack_regions(windows, regions, screen=None, order=None):
     pending, packed = list(windows), []
     limits = {w["id"]: window_minimum(w) for w in windows}
     for region in regions:
@@ -238,8 +298,8 @@ def pack_regions(windows, regions):
         minimum_height = min(limits[w["id"]]["height"] for w in compatible)
         capacity = math.floor((region["width"] - PANE_GAP) / (minimum_width + PANE_GAP)) * math.floor((region["height"] - PANE_GAP) / (minimum_height + PANE_GAP))
         for count in range(min(len(compatible), capacity), 0, -1):
-            ordered = companion_order(compatible[:count])
-            frames = constrained_tiles(ordered, region)
+            ordered = sorted(compatible[:count], key=lambda w: order.get(w["id"], len(order))) if order is not None else companion_order(compatible[:count])
+            frames = constrained_tiles(ordered, region, screen)
             if frames is not None:
                 packed.extend(zip(ordered, frames))
                 assigned = {w["id"] for w in ordered}
@@ -248,8 +308,9 @@ def pack_regions(windows, regions):
     return packed, pending
 
 
-def build_actions(inventory, decisions):
+def build_actions(inventory, decisions, layout_order=None):
     windows = eligible_windows(inventory)
+    order = {id: i for i, id in enumerate(layout_order)} if layout_order is not None else None
     validate_decisions(windows, decisions, available_roles(inventory))
     roles = {d["id"]: d["role"] for d in decisions}
     screens = inventory["displays"]
@@ -272,7 +333,7 @@ def build_actions(inventory, decisions):
         group = [w for w in group if w["is_focused"]] + [w for w in group if not w["is_focused"]]
         screen = screens_by_role[role]
         minimum = {axis: min(window_minimum(w)[axis] for w in group) for axis in ("width", "height")}
-        packed, overflow_windows = pack_regions(group, free_regions(screen["usable"], fixed, minimum))
+        packed, overflow_windows = pack_regions(group, free_regions(screen["usable"], fixed, minimum), screen, order)
         for overflow in overflow_windows:
             if overflow["is_focused"]:
                 raise ValueError("The focused window cannot fit this display. Choose a larger display.")
@@ -298,10 +359,54 @@ def companion_order(windows):
     return [first, partner, *(w for w in windows if w["id"] not in chosen)]
 
 
+def revise_actions(inventory, actions, operation, window_id, target=None):
+    """Edit a draft only. Swaps retain slots; display moves reuse the planner."""
+    known = {w["id"]: w for w in eligible_windows(inventory)}
+    if window_id not in known:
+        raise ValueError("This window is no longer in the draft. Refresh the preview.")
+    if operation == "swap":
+        indices = {a["window"]["id"]: i for i, a in enumerate(actions)}
+        if window_id == target:
+            return list(actions)
+        if window_id not in indices or target not in indices:
+            raise ValueError("Drop onto a window pane or a display.")
+        left, right = actions[indices[window_id]], actions[indices[target]]
+        if left["kind"] != "move" or right["kind"] != "move":
+            raise ValueError("Drop background windows onto a display to restore them.")
+        for slot, occupant in ((left, right["window"]), (right, left["window"])):
+            minimum = window_minimum(occupant)
+            if any(slot["target"][axis] < minimum[axis] for axis in ("width", "height")):
+                raise ValueError(f"{occupant['app_name']} needs a larger pane. Drop it onto the display to reflow.")
+        result = [dict(a) for a in actions]
+        result[indices[window_id]]["window"] = right["window"]
+        result[indices[target]]["window"] = left["window"]
+        return result
+    if operation not in ("move", "minimize", "close"):
+        raise ValueError("Unknown layout edit.")
+    if operation in ("minimize", "close") and known[window_id].get("is_focused"):
+        raise ValueError("Keep the current work window visible.")
+    roles = {id: "unchanged" for id in known}
+    for action in actions:
+        roles[action["window"]["id"]] = "display_" + action["display"] if action["kind"] == "move" else action["kind"]
+    if operation == "move":
+        if target not in {s["id"] for s in inventory["displays"]}:
+            raise ValueError("That display is no longer connected. Refresh the preview.")
+        roles[window_id] = "display_" + target
+    else:
+        roles[window_id] = operation
+    order = [a["window"]["id"] for a in actions if a["kind"] == "move"]
+    ordered_ids = set(order)
+    order.extend(id for id in known if id not in ordered_ids)
+    result = build_actions(inventory, [{"id": id, "role": role} for id, role in roles.items()], layout_order=order)
+    if operation == "move" and not any(a["window"]["id"] == window_id and a["kind"] == "move" for a in result):
+        raise ValueError("This window's minimum size will not fit there. Make room or choose another display.")
+    return result
+
+
 def layout_report(observed):
     windows = eligible_windows(observed)
     analysis = analyze_overlaps([w["bounds"] for w in windows])
     overlaps = [{"a": windows[i]["id"], "b": windows[j]["id"], "apps": [windows[i]["app_name"], windows[j]["app_name"]]} for i, j in analysis.examples]
     return {"visible_windows": len(windows), "windows": windows, "displays": observed.get("displays", []), "overlap_count": analysis.count, "overlaps": overlaps,
             "overlaps_truncated": analysis.count > len(overlaps),
-            "coverage": observed["coverage"], "excluded_apps": ["Desk Tidy", "Google Chrome for Testing"]}
+            "coverage": observed["coverage"], "excluded_apps": ["Fenlet", "Google Chrome for Testing"]}

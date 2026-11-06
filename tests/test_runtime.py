@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from desk_tidy.runtime import decide
+from fenlet.runtime import decide
 from tests.test_core import inventory, window
 
 
@@ -12,7 +12,7 @@ class DecisionCacheTest(unittest.TestCase):
     def test_identical_state_reuses_classification_but_changed_context_does_not(self):
         inv = inventory([window()])
         response = ([{"id": "w-1", "role": "display_external"}], {"model": "test", "latency_ms": 250, "cost": .001})
-        with tempfile.TemporaryDirectory() as directory, patch("desk_tidy.runtime.STATE", Path(directory)), patch("desk_tidy.runtime.request_decisions", return_value=response) as request:
+        with tempfile.TemporaryDirectory() as directory, patch("fenlet.runtime.STATE", Path(directory)), patch("fenlet.runtime.request_decisions", return_value=response) as request:
             decide(inv, "Arrange", use_cache=True)
             _, meta = decide(inv, "Arrange", use_cache=True)
             self.assertEqual(request.call_count, 1)
@@ -36,7 +36,7 @@ class DecisionCacheTest(unittest.TestCase):
     def test_benchmarks_do_not_use_the_decision_cache(self):
         inv = inventory([window()])
         response = ([{"id": "w-1", "role": "display_external"}], {"cost": .001})
-        with patch("desk_tidy.runtime.request_decisions", return_value=response) as request:
+        with patch("fenlet.runtime.request_decisions", return_value=response) as request:
             decide(inv, "Arrange")
             decide(inv, "Arrange")
             self.assertEqual(request.call_count, 2)

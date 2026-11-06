@@ -2,16 +2,25 @@ import AppKit
 import SwiftUI
 import ApplicationServices
 
-struct Bounds: Decodable { let x, y, width, height: Double }
-struct ScreenInfo: Decodable, Identifiable {
+struct Bounds: Decodable, Equatable { let x, y, width, height: Double }
+struct PhysicalSize: Decodable, Equatable { let width, height: Double }
+struct ScreenInfo: Decodable, Identifiable, Equatable {
     let id, name: String
     let built_in: Bool
     let bounds, usable: Bounds
+    let physical_size_mm: PhysicalSize?
+    var diagonal: String? {
+        guard let mm = physical_size_mm else { return nil }
+        return String(format: "%.0f″", hypot(mm.width, mm.height) / 25.4)
+    }
 }
 struct WindowInfo: Decodable, Identifiable {
     let id, app_name, title: String
+    let pid: Int32
+    let process_instance: String
     let bounds: Bounds
     let minimized: Bool
+    let is_focused: Bool?
 }
 struct ActionInfo: Decodable, Identifiable {
     let kind: String
@@ -30,7 +39,6 @@ struct ActionInfo: Decodable, Identifiable {
 struct InventoryInfo: Decodable {
     let displays: [ScreenInfo]
     let windows: [WindowInfo]
-    let days: Int
 }
 struct PlanInfo: Decodable { let inventory: InventoryInfo; let actions: [ActionInfo] }
 struct DoctorInfo: Decodable { let accessibility, key_configured, runtime_ready: Bool }
@@ -43,13 +51,12 @@ struct PreviewInfo: Decodable {
     let plan_path: String
     let plan: PlanInfo
     let window_count, action_count: Int
-    let screenshot_count, screenshot_bytes: Int?
     let model: ModelInfo?
     let coverage: CoverageInfo
     func showing(_ check: ApplyInfo.LayoutCheck) -> PreviewInfo {
-        let inventory = InventoryInfo(displays: check.displays, windows: check.windows, days: plan.inventory.days)
+        let inventory = InventoryInfo(displays: check.displays, windows: check.windows)
         return PreviewInfo(plan_path: plan_path, plan: PlanInfo(inventory: inventory, actions: []), window_count: check.windows.count,
-            action_count: 0, screenshot_count: screenshot_count, screenshot_bytes: screenshot_bytes, model: model, coverage: coverage)
+            action_count: 0, model: model, coverage: coverage)
     }
 }
 struct Envelope<T: Decodable>: Decodable { let ok: Bool; let data: T?; let error: String? }
@@ -60,7 +67,6 @@ struct ApplyInfo: Decodable {
     let undoable: Bool
     let layout_check: LayoutCheck?
 }
-struct TidyInfo: Decodable { let preview: PreviewInfo; let result: ApplyInfo; let elapsed_ms: Int }
 struct UndoInfo: Decodable {
     struct Skip: Decodable { let reason: String }
     let restored: Int
@@ -83,28 +89,77 @@ enum TidyError: LocalizedError {
 }
 
 @MainActor final class Store: ObservableObject {
+    let windowPreviews = WindowPreviews()
+    let windowPeek = WindowPeek()
+    let draftCursor = DraftCursor()
+    var draftTargets: [DraftTarget] = []
+    @Published var draftTarget: DraftTarget.Kind?
+    @Published var liveInventory: InventoryInfo?
+    @Published var liveReadOK = false
+    private var liveTask: Task<Void, Never>?
+    private var desktopRevision = 0
     @Published var preview: PreviewInfo?
-    @Published var filePreview: PreviewInfo?
     @Published var busy = false
     @Published var status = "Ready when you are."
     @Published var error: String?
     @Published var settings = Settings()
     @Published var hasLayout = false
+    @Published var editingDraft = false
+    @Published var draggedWindowID: String?
+    private var instructionSaveTask: Task<Void, Never>?
     @Published var journal: String?
-    @Published var journalScope = "windows"
     @Published var showingSettings = false
-    @Published var screenshotDays = 30
     @Published var onboarding = false
     @Published var accessibility = false
     @Published var keyConfigured = false
     var frontmostPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
-    let config = ProcessInfo.processInfo.environment["DESK_TIDY_CONFIG"].map { URL(fileURLWithPath: $0) }
-        ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/desk-tidy/config.json")
-    let history = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/state/desk-tidy/widget-history.json")
+    let config = ProcessInfo.processInfo.environment["FENLET_CONFIG"].map { URL(fileURLWithPath: $0) }
+        ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/fenlet/config.json")
+    let history = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/state/fenlet/widget-history.json")
 
     init() {
         if let d = try? Data(contentsOf: config), let s = try? JSONDecoder().decode(Settings.self, from: d) { settings = s }
-        if let d = try? Data(contentsOf: history), let h = try? JSONDecoder().decode([String: String].self, from: d) { journal = h["journal"]; journalScope = h["scope"] ?? "windows" }
+        if let d = try? Data(contentsOf: history), let h = try? JSONDecoder().decode([String: String].self, from: d) { journal = h["journal"] }
+    }
+    func startPreviewUpdates() {
+        guard liveTask == nil else { return }
+        if CommandLine.arguments.contains("--diagnose") { fputs("live preview: started\n", stderr) }
+        liveTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                if !self.busy && !self.editingDraft && self.draggedWindowID == nil && !self.onboarding && !self.showingSettings {
+                    let revision = self.desktopRevision
+                    do {
+                        let data = try await Self.command(["scan"], settings: self.settings, frontmostPid: self.frontmostPid)
+                        let response = try JSONDecoder().decode(Envelope<InventoryInfo>.self, from: data)
+                        if !Task.isCancelled, !self.busy, !self.editingDraft, revision == self.desktopRevision, response.ok, let inventory = response.data {
+                            self.liveReadOK = true
+                            if self.hasLayout, let planned = self.preview?.plan.inventory, !Self.sameLayout(planned, inventory) {
+                                self.hasLayout = false
+                                self.status = "Windows changed. Refresh your layout to continue."
+                            }
+                            self.liveInventory = inventory
+                            self.windowPeek.update(inventory.windows, captures: self.windowPreviews)
+                            self.windowPreviews.refresh(inventory.windows, maxAge: 0.9)
+                        } else if !Task.isCancelled { self.liveReadOK = false }
+                    } catch { if !Task.isCancelled { self.liveReadOK = false } }
+                }
+                do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { return }
+            }
+        }
+    }
+    func stopPreviewUpdates() {
+        liveTask?.cancel(); liveTask = nil; windowPreviews.pause(); windowPeek.hide()
+        liveReadOK = false
+        if CommandLine.arguments.contains("--diagnose") { fputs("live preview: stopped\n", stderr) }
+    }
+    static func sameLayout(_ planned: InventoryInfo, _ live: InventoryInfo) -> Bool {
+        guard planned.displays == live.displays, planned.windows.count == live.windows.count else { return false }
+        let actual = Dictionary(uniqueKeysWithValues: live.windows.map { ($0.id, $0) })
+        return planned.windows.allSatisfy { w in
+            guard let current = actual[w.id] else { return false }
+            return w.pid == current.pid && w.process_instance == current.process_instance && w.bounds == current.bounds && w.minimized == current.minimized
+        }
     }
     var layoutRequest: String {
         "Tile current work, chat and useful references using the supplied display preferences. "
@@ -112,19 +167,55 @@ enum TidyError: LocalizedError {
         + "When coding, place the related work browser beside the active terminal; keep communication separate. "
         + "Additional user preferences take priority: \(settings.customInstructions ?? "")"
     }
+    var availableDisplays: [ScreenInfo] { liveInventory?.displays ?? preview?.plan.inventory.displays ?? [] }
+    var hasStalePreview: Bool { !hasLayout && preview?.plan.actions.isEmpty == false }
+    var hasDraft: Bool { preview?.plan.actions.isEmpty == false }
+    func cancelPreview() { desktopRevision += 1; hasLayout = false; preview = nil; draggedWindowID = nil; draftCursor.position = nil; draftTarget = nil; editingDraft = false; status = "Ready to arrange." }
+    func target(at point: CGPoint) -> DraftTarget.Kind? {
+        let hit = draftTargets.filter { $0.frame.contains(point) }
+        return hit.first { if case .pane = $0.kind { return true }; return false }?.kind
+            ?? hit.first { if case .disposition = $0.kind { return true }; return false }?.kind
+            ?? hit.first?.kind
+    }
+    func trackDraftDrag(_ window: WindowInfo, at point: CGPoint) {
+        guard hasLayout, !busy, !editingDraft else { return }
+        if draggedWindowID == nil { windowPeek.hide(); desktopRevision += 1; draggedWindowID = window.id }
+        draftCursor.position = DraftCursor.Position(window: window, point: point)
+        let next = target(at: point)
+        if draftTarget != next { draftTarget = next }
+    }
+    func finishDraftDrag(_ id: String, at point: CGPoint) {
+        let destination = target(at: point)
+        draggedWindowID = nil; draftCursor.position = nil; draftTarget = nil
+        guard hasLayout, let destination, let actions = preview?.plan.actions else { return }
+        switch destination {
+        case .pane(let other):
+            guard id != other else { return }
+            if actions.first(where: { $0.id == id })?.kind == "move" { editDraft(["--swap", id, other]) }
+            else if let screen = actions.first(where: { $0.id == other })?.display { editDraft(["--move", id, screen]) }
+        case .display(let display):
+            if actions.first(where: { $0.id == id })?.display != display { editDraft(["--move", id, display]) }
+        case .disposition(let kind): editDraft(["--" + kind, id])
+        }
+    }
     func destination(_ key: WritableKeyPath<Settings, String?>) -> Binding<String> {
         Binding(get: {
-            guard let selected = self.settings[keyPath: key], self.preview?.plan.inventory.displays.contains(where: { $0.id == selected }) == true else { return "auto" }
+            guard let selected = self.settings[keyPath: key], self.availableDisplays.contains(where: { $0.id == selected }) else { return "auto" }
             return selected
         }, set: {
-            self.settings[keyPath: key] = $0; self.hasLayout = false
+            self.settings[keyPath: key] = $0; self.desktopRevision += 1; self.hasLayout = false
             do { try self.persist() } catch { self.error = error.localizedDescription }
         })
     }
     var customInstructions: Binding<String> {
         Binding(get: { self.settings.customInstructions ?? "" }, set: {
-            self.settings.customInstructions = $0; self.hasLayout = false
-            do { try self.persist() } catch { self.error = error.localizedDescription }
+            self.settings.customInstructions = $0; self.desktopRevision += 1; self.hasLayout = false
+            self.instructionSaveTask?.cancel()
+            self.instructionSaveTask = Task {
+                do { try await Task.sleep(nanoseconds: 250_000_000); try self.persist() }
+                catch is CancellationError { }
+                catch { self.error = error.localizedDescription }
+            }
         })
     }
     func persist() throws {
@@ -132,11 +223,11 @@ enum TidyError: LocalizedError {
         try JSONEncoder().encode(settings).write(to: config, options: [.atomic])
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: config.path)
     }
-    func remember(_ path: String, scope: String) {
-        journal = path; journalScope = scope
+    func remember(_ path: String) {
+        journal = path
         do {
             try FileManager.default.createDirectory(at: history.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            try JSONEncoder().encode(["journal": path, "scope": scope]).write(to: history, options: [.atomic])
+            try JSONEncoder().encode(["journal": path]).write(to: history, options: [.atomic])
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: history.path)
         } catch { self.error = error.localizedDescription }
     }
@@ -144,14 +235,14 @@ enum TidyError: LocalizedError {
         let root = Bundle.main.resourceURL!
         return try await Task.detached {
             let p = Process()
-            p.executableURL = root.appendingPathComponent("bin/desk-tidy")
+            p.executableURL = root.appendingPathComponent("bin/fenlet")
             var prefix = ["--json"]
             if let file = settings.envFile, !file.isEmpty { prefix += ["--env-file", file] }
             p.arguments = prefix + args
             p.currentDirectoryURL = root
             var env = ProcessInfo.processInfo.environment
             env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:\(NSHomeDirectory())/.bun/bin:" + (env["PATH"] ?? "/usr/bin:/bin")
-            if let pid = frontmostPid { env["DESK_TIDY_FRONTMOST_PID"] = String(pid) }
+            if let pid = frontmostPid { env["FENLET_FRONTMOST_PID"] = String(pid) }
             p.environment = env
             let pipe = Pipe()
             p.standardOutput = pipe
@@ -184,68 +275,95 @@ enum TidyError: LocalizedError {
         guard e.ok else { throw TidyError.message(e.error ?? "Could not save the key.") }
         checkSetup()
     }
-    func scan(layout: Bool, onReady: (() -> Void)? = nil) {
+    func scan(layout: Bool) {
         guard !busy else { return }
+        desktopRevision += 1
+        let revision = desktopRevision
         busy = true; error = nil; hasLayout = false
-        status = layout ? "Finding a little more room…" : "Taking a look around…"
-        let args = layout ? layoutArguments("plan") : ["cleanup", "--days", String(screenshotDays)]
+        status = layout ? "Preparing your layout…" : "Reading windows…"
         Task {
             defer { busy = false }
             do {
-                let d = try await Self.command(args, settings: settings, frontmostPid: frontmostPid)
-                let e = try JSONDecoder().decode(Envelope<PreviewInfo>.self, from: d)
-                guard e.ok, let result = e.data else { throw TidyError.message(e.error ?? "Could not preview. Try again.") }
-                if layout { preview = result }
-                else { filePreview = result; if preview == nil { preview = result } }
-                hasLayout = layout
-                status = layout ? "\(result.action_count) window changes ready to review." : "\(result.window_count) windows across \(result.plan.inventory.displays.count) displays."
-                onReady?()
-            } catch { self.error = error.localizedDescription; status = "Nothing changed." }
+                let data = try await Self.command(layout ? layoutArguments("plan") : ["scan"], settings: settings, frontmostPid: frontmostPid)
+                guard revision == desktopRevision else { return }
+                let inventory: InventoryInfo
+                if layout {
+                    let response = try JSONDecoder().decode(Envelope<PreviewInfo>.self, from: data)
+                    guard response.ok, let result = response.data else { throw TidyError.message(response.error ?? "Could not preview.") }
+                    preview = result; inventory = result.plan.inventory; hasLayout = true
+                } else {
+                    let response = try JSONDecoder().decode(Envelope<InventoryInfo>.self, from: data)
+                    guard response.ok, let result = response.data else { throw TidyError.message(response.error ?? "Could not read windows.") }
+                    inventory = result
+                }
+                liveInventory = inventory; liveReadOK = true
+                if liveTask != nil { windowPreviews.refresh(inventory.windows) }
+                status = layout ? "Drag tiles to adjust. Confirm when it feels right." : "Ready to arrange."
+            } catch { self.error = error.localizedDescription; status = "Try refreshing your preview." }
         }
     }
     func layoutArguments(_ command: String) -> [String] {
-        [command, layoutRequest, "--model", settings.model, "--provider", settings.provider, "--days", String(screenshotDays),
+        [command, layoutRequest, "--model", settings.model, "--provider", settings.provider,
          "--work-display", settings.workScreen ?? "auto", "--chat-display", settings.chatScreen ?? "auto", "--reference-display", settings.referenceScreen ?? "auto"]
     }
-    func complete(_ result: ApplyInfo, scope: String, from before: PreviewInfo, elapsed: Int) {
-        if result.undoable { remember(result.journal_path, scope: scope) }
-        if let check = result.layout_check { preview = before.showing(check) }
-        if scope == "screenshots" { filePreview = nil }
-        status = scope == "windows" ? "\(result.arranged) arranged · \(result.minimized) minimized · \(result.closed) closed · \(String(format: "%.1fs", Double(elapsed) / 1000))" : "\(result.succeeded) screenshots moved to Trash."
-        if scope == "windows", result.arranged + result.minimized + result.closed == 0, result.failed == 0 { status = "Already tidy. · \(String(format: "%.1fs", Double(elapsed) / 1000))" }
-        if result.failed > 0 { error = "\(result.failed) windows couldn’t be changed. Preview to review them." }
-        if let check = result.layout_check, check.overlap_count > 0 { error = "\(check.overlap_count) overlapping window pairs remain. Preview to review." }
+    func complete(_ result: ApplyInfo, from before: PreviewInfo, elapsed: Int) {
+        if result.undoable { remember(result.journal_path) }
+        if let check = result.layout_check {
+            preview = before.showing(check)
+            liveInventory = InventoryInfo(displays: check.displays, windows: check.windows)
+            if liveTask != nil { windowPreviews.refresh(check.windows) }
+        }
+        status = "\(result.arranged) arranged · \(result.minimized) minimized · \(result.closed) closed · \(String(format: "%.1fs", Double(elapsed) / 1000))"
+        if result.arranged + result.minimized + result.closed == 0, result.failed == 0 { status = "Already arranged. · \(String(format: "%.1fs", Double(elapsed) / 1000))" }
+        if result.failed > 0 { error = "\(result.failed) windows couldn’t be changed. Refresh to review them." }
+        if let check = result.layout_check, check.overlap_count > 0 { error = "\(check.overlap_count) overlapping pairs remain. Refresh to review." }
     }
-    func tidy() {
-        guard !busy else { return }
-        busy = true; error = nil; hasLayout = false; status = "Arranging windows…"
+    func editDraft(_ arguments: [String]) {
+        guard !busy, !editingDraft, hasLayout, let before = preview else { return }
+        desktopRevision += 1
+        let revision = desktopRevision
+        editingDraft = true; error = nil; windowPeek.hide()
+        // Swap occupants immediately; the shared engine validates and saves the draft.
+        if arguments.count == 3, arguments[0] == "--swap",
+           let a = before.plan.actions.firstIndex(where: { $0.id == arguments[1] }),
+           let b = before.plan.actions.firstIndex(where: { $0.id == arguments[2] }) {
+            var actions = before.plan.actions
+            let left = actions[a], right = actions[b]
+            actions[a] = ActionInfo(kind: left.kind, window: right.window, target: left.target, display: left.display)
+            actions[b] = ActionInfo(kind: right.kind, window: left.window, target: right.target, display: right.display)
+            preview = PreviewInfo(plan_path: before.plan_path, plan: PlanInfo(inventory: before.plan.inventory, actions: actions),
+                                  window_count: before.window_count, action_count: before.action_count, model: before.model, coverage: before.coverage)
+        }
         Task {
-            defer { busy = false }
+            defer { editingDraft = false }
             do {
-                let data = try await Self.command(layoutArguments("tidy") + ["--yes"], settings: settings, frontmostPid: frontmostPid)
-                let response = try JSONDecoder().decode(Envelope<TidyInfo>.self, from: data)
-                guard response.ok, let result = response.data else { throw TidyError.message(response.error ?? "Could not arrange windows.") }
-                complete(result.result, scope: "windows", from: result.preview, elapsed: result.elapsed_ms)
-            } catch { self.error = error.localizedDescription; status = "Preview to review your windows." }
+                let data = try await Self.command(["edit", before.plan_path] + arguments, settings: settings)
+                guard revision == desktopRevision else { return }
+                let response = try JSONDecoder().decode(Envelope<PreviewInfo>.self, from: data)
+                guard response.ok, let result = response.data else { throw TidyError.message(response.error ?? "Could not adjust this draft.") }
+                preview = result; status = "Draft updated. Your windows haven’t moved yet."
+            } catch {
+                if revision == desktopRevision { preview = before; self.error = error.localizedDescription }
+            }
         }
     }
-    func apply(scope: String) {
-        guard !busy, let preview = scope == "screenshots" ? filePreview : preview else { return }
-        busy = true; error = nil
-        status = scope == "windows" ? "Making room…" : "Moving old screenshots to Trash…"
-        let path = preview.plan_path
+    func apply() {
+        guard !busy, !editingDraft, hasLayout, let preview else { return }
+        desktopRevision += 1
+        busy = true; error = nil; status = "Arranging windows…"
         Task {
             defer { busy = false; hasLayout = false }
             do {
-                let d = try await Self.command(["apply", path, "--scope", scope, "--yes"], settings: settings)
-                let e = try JSONDecoder().decode(Envelope<ApplyInfo>.self, from: d)
-                guard e.ok, let result = e.data else { throw TidyError.message(e.error ?? "Could not apply the preview.") }
-                complete(result, scope: scope, from: preview, elapsed: result.apply_ms)
-            } catch { self.error = error.localizedDescription; status = "Make a fresh preview to continue." }
+                let data = try await Self.command(["apply", preview.plan_path, "--yes"], settings: settings)
+                let response = try JSONDecoder().decode(Envelope<ApplyInfo>.self, from: data)
+                guard response.ok, let result = response.data else { throw TidyError.message(response.error ?? "Could not apply this layout.") }
+                complete(result, from: preview, elapsed: result.apply_ms)
+            } catch { self.error = error.localizedDescription; status = "Refresh your preview to continue." }
         }
     }
     func undo() {
         guard !busy, let journal = journal else { return }
+        desktopRevision += 1
         busy = true; error = nil; status = "Putting things back…"
         Task {
             defer { busy = false; hasLayout = false; preview = nil }
@@ -272,170 +390,223 @@ struct AppGlyph: View {
     }
 }
 
-struct DisplayCard: View {
-    let screen: ScreenInfo
-    let windows: [WindowInfo]
-    let actions: [ActionInfo]
-    let proposed: Bool
-    var arranged: [ActionInfo] { actions.filter { $0.kind == "move" && $0.display == screen.id } }
-    var visibleHere: [WindowInfo] {
-        windows.filter { w in
-            let b = w.bounds, s = screen.bounds
-            return !w.minimized && b.x + b.width / 2 >= s.x && b.x + b.width / 2 < s.x + s.width && b.y + b.height / 2 >= s.y && b.y + b.height / 2 < s.y + s.height
-        }
+struct PreviewPane: Identifiable {
+    let window: WindowInfo
+    let frame: Bounds
+    var id: String { window.id }
+}
+
+struct WindowThumbnail: View {
+    let window: WindowInfo
+    @ObservedObject var captures: WindowPreviews
+    var body: some View {
+        ZStack {
+            Color(nsColor: .controlBackgroundColor)
+            if let image = captures.image(for: window) {
+                Image(nsImage: image).resizable().aspectRatio(contentMode: .fit)
+            } else {
+                VStack(spacing: 5) {
+                    AppGlyph(name: window.app_name)
+                    Text(window.app_name).font(.system(size: 10, weight: .medium)).lineLimit(1)
+                }.foregroundStyle(.secondary).padding(4)
+            }
+        }.clipped()
     }
-    var count: Int {
-        visibleHere.count
+}
+
+struct WindowTile: View {
+    let window: WindowInfo
+    var compact = false
+    @ObservedObject var captures: WindowPreviews
+    let inspect: () -> Void
+    let hoverChange: (Bool) -> Void
+    @State private var hovered = false
+    @Environment(\.colorScheme) private var colorScheme
+    var outline: Color {
+        if hovered { return .accentColor }
+        return colorScheme == .dark ? Color.white.opacity(0.14) : Color.black.opacity(0.12)
     }
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack(spacing: 6) {
-                Image(systemName: screen.built_in ? "laptopcomputer" : "display").font(.system(size: 13))
-                    .foregroundStyle(screen.built_in ? Color.teal : Color.accentColor)
-                Text(screen.name).font(.system(size: 11, weight: .semibold)).lineLimit(1).help(screen.name)
-                Spacer(minLength: 0)
-            }
-            if proposed {
-                GeometryReader { geo in
-                    let area = screen.usable
-                    ZStack(alignment: .topLeading) {
-                        RoundedRectangle(cornerRadius: 7).fill(.black.opacity(0.12))
-                        ForEach(arranged) { action in
-                            if let b = action.target {
-                                RoundedRectangle(cornerRadius: 4).fill(Color.accentColor.opacity(0.2))
-                                    .overlay { AppGlyph(name: action.window.app_name) }
-                                    .frame(width: max(4, b.width / area.width * geo.size.width), height: max(4, b.height / area.height * geo.size.height))
-                                    .offset(x: (b.x - area.x) / area.width * geo.size.width, y: (b.y - area.y) / area.height * geo.size.height)
-                                    .help(action.window.app_name + " · " + action.window.title)
-                            }
+        Button(action: inspect) {
+            WindowThumbnail(window: window, captures: captures)
+                .overlay(alignment: .bottomLeading) {
+                    HStack(spacing: 4) {
+                        AppGlyph(name: window.app_name).frame(width: 12, height: 12)
+                        if !compact { Text(window.app_name).font(.system(size: 9, weight: .medium)).lineLimit(1) }
+                    }.padding(.horizontal, 5).padding(.vertical, 3)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 5))
+                        .padding(4)
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay { RoundedRectangle(cornerRadius: 6).strokeBorder(outline, lineWidth: hovered ? 1.5 : 0.5) }
+                .shadow(color: .black.opacity(0.12), radius: 2, y: 1)
+        }.buttonStyle(.plain).onHover { hovered = $0; hoverChange($0) }
+            .accessibilityLabel("Preview " + window.app_name + ": " + window.title)
+    }
+}
+
+struct DisplayCard: View {
+    @ObservedObject var store: Store
+    let screen: ScreenInfo
+    let inventory: InventoryInfo
+    let actions: [ActionInfo]
+    let proposed: Bool
+    @ObservedObject var captures: WindowPreviews
+    let peek: WindowPeek
+    let single: Bool
+    var panes: [PreviewPane] {
+        let changed = proposed ? Set(actions.map(\.id)) : []
+        let actual = Dictionary(uniqueKeysWithValues: inventory.windows.map { ($0.id, $0) })
+        let current = inventory.windows.filter { w in
+            let b = w.bounds, s = screen.bounds
+            return !w.minimized && !changed.contains(w.id) && b.x + b.width / 2 >= s.x && b.x + b.width / 2 < s.x + s.width && b.y + b.height / 2 >= s.y && b.y + b.height / 2 < s.y + s.height
+        }.map { PreviewPane(window: $0, frame: $0.bounds) }
+        let arranged = proposed ? actions.filter { $0.kind == "move" && $0.display == screen.id }.compactMap { a in
+            a.target.map { PreviewPane(window: actual[a.id] ?? a.window, frame: $0) }
+        } : []
+        // CG lists frontmost first; draw it last to preserve actual stacking.
+        return Array(current.reversed()) + arranged
+    }
+    func show(_ window: WindowInfo) {
+        captures.prioritize([window], in: inventory.windows)
+        peek.show(window, captures: captures)
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 5) {
+                Image(systemName: screen.built_in ? "laptopcomputer" : "display").foregroundStyle(.secondary)
+                Text(screen.name).lineLimit(1).help(screen.name)
+                Spacer(minLength: 2)
+                Text("\(panes.count)").foregroundStyle(.secondary).monospacedDigit()
+            }.font(.system(size: 10, weight: .medium))
+            GeometryReader { geo in
+                let area = screen.usable
+                let scale = min(geo.size.width / area.width, geo.size.height / area.height)
+                ZStack(alignment: .topLeading) {
+                    Color(nsColor: .underPageBackgroundColor).opacity(0.6)
+                    ForEach(panes) { pane in
+                        WindowTile(window: pane.window, compact: pane.frame.width * scale < 65, captures: captures, inspect: { show(pane.window) }, hoverChange: { inside in
+                            if inside && store.draggedWindowID == nil { show(pane.window) } else { peek.hide() }
+                        })
+                            .modifier(DraftTileInteractions(store: store, window: pane.window))
+                            .frame(width: max(2, pane.frame.width * scale), height: max(2, pane.frame.height * scale))
+                            .offset(x: (pane.frame.x - area.x) * scale, y: (pane.frame.y - area.y) * scale)
+                    }
+                    if panes.isEmpty {
+                        Text(proposed ? "Drop a window here" : "No windows").font(.system(size: 10)).foregroundStyle(.tertiary)
+                            .frame(width: area.width * scale, height: area.height * scale)
+                    }
+                }.frame(width: area.width * scale, height: area.height * scale)
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    .modifier(DraftTargetRegion(kind: .display(screen.id)))
+            }.frame(height: single ? 182 : screen.bounds.height > screen.bounds.width ? 148 : 110)
+        }.padding(10).background(.quaternary.opacity(0.2), in: RoundedRectangle(cornerRadius: 12))
+            .overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(store.draftTarget == .display(screen.id) ? Color.accentColor : .primary.opacity(0.06), lineWidth: 1) }
+    }
+}
+
+struct DisplayGallery: View {
+    @ObservedObject var store: Store
+    @ObservedObject var captures: WindowPreviews
+    var body: some View {
+        if let inventory = store.liveInventory {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text(store.hasLayout ? "Proposed layout" : "Your windows").font(.system(size: 11, weight: .medium))
+                    Spacer()
+                    if !store.hasLayout { Text(store.liveReadOK ? "Live" : "Updating…").font(.system(size: 10)).foregroundStyle(.secondary) }
+                }
+                ScrollView {
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8, alignment: .top), count: inventory.displays.count == 1 ? 1 : 2), spacing: 8) {
+                        ForEach(inventory.displays) { screen in
+                            DisplayCard(store: store, screen: screen, inventory: inventory, actions: store.preview?.plan.actions ?? [], proposed: store.hasLayout,
+                                        captures: captures, peek: store.windowPeek, single: inventory.displays.count == 1)
                         }
                     }
-                }.frame(height: 66)
-                Text("\(arranged.count) windows").font(.system(size: 10)).foregroundStyle(.secondary).monospacedDigit()
-            } else {
-                GeometryReader { geo in
-                    let area = screen.usable
-                    ZStack(alignment: .topLeading) {
-                        RoundedRectangle(cornerRadius: 7).fill(.black.opacity(0.12))
-                        ForEach(visibleHere) { w in
-                            let b = w.bounds
-                            RoundedRectangle(cornerRadius: 4).fill(Color.accentColor.opacity(0.2)).overlay { AppGlyph(name: w.app_name) }
-                                .frame(width: max(4, b.width / area.width * geo.size.width), height: max(4, b.height / area.height * geo.size.height))
-                                .offset(x: (b.x - area.x) / area.width * geo.size.width, y: (b.y - area.y) / area.height * geo.size.height)
-                        }
-                    }.clipped()
-                }.frame(height: 66)
-                Text("\(count) open").font(.system(size: 10)).foregroundStyle(.secondary).monospacedDigit()
-            }
-        }.frame(maxWidth: .infinity).frame(height: 108, alignment: .topLeading)
-            .padding(11).background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
+                    .padding(.trailing, inventory.displays.count > 2 ? 8 : 0)
+                }.scrollIndicators(inventory.displays.count > 2 ? .visible : .hidden)
+                if !captures.allowed && captures.supported {
+                    HStack {
+                        Text("Allow Screen Recording for window previews.").font(.system(size: 10)).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Allow…") { captures.enable(); captures.refresh(inventory.windows) }.controlSize(.small)
+                    }
+                } else {
+                    Text(store.hasLayout ? (inventory.displays.count == 1 ? "Drag to swap panes · Right-click for more" : "Drag to swap panes or move between displays") : "Hover a window for a closer look")
+                        .font(.system(size: 10)).foregroundStyle(.tertiary)
+                }
+            }.frame(maxHeight: .infinity, alignment: .top)
+        } else {
+            HStack(spacing: 10) { ProgressView().controlSize(.small); Text("Reading your windows…").font(.system(size: 12)).foregroundStyle(.secondary) }
+                .frame(maxWidth: .infinity, minHeight: 130)
+        }
+    }
+}
+
+struct TidyButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var enabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(.white.opacity(enabled ? 1 : 0.5))
+            .frame(maxWidth: .infinity).frame(height: 40)
+            .background(Color.accentColor.opacity(enabled ? 1 : 0.35), in: RoundedRectangle(cornerRadius: 11))
+            .scaleEffect(configuration.isPressed && !reduceMotion ? 0.96 : 1)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 
 struct Panel: View {
     @ObservedObject var store: Store
-    @State private var confirmCleanup = false
-    @State private var showChanges = false
-    @State private var showCustom = false
     var modelTitle: String { store.settings.model == "jev" ? "Jev 1.14" : store.settings.model == "hybrid" ? "Jev + Nemotron" : store.settings.model.capitalized }
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 9) {
-                Image(systemName: "rectangle.3.group.fill").font(.system(size: 19)).foregroundStyle(Color.accentColor)
-                Text("Desk Tidy").font(.system(size: 16, weight: .semibold))
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(nsImage: FenletBrand.widgetMark).renderingMode(.template).resizable().frame(width: 22, height: 22).foregroundStyle(Color.accentColor).accessibilityHidden(true)
+                Text("Fenlet").font(.system(size: 16, weight: .semibold))
                 Spacer()
-                Button { store.showingSettings.toggle() } label: { Image(systemName: store.showingSettings ? "xmark" : "gearshape").frame(width: 30, height: 30) }
-                    .buttonStyle(.plain).foregroundStyle(.secondary).help("Settings").accessibilityLabel("Settings")
+                if store.hasDraft && !store.showingSettings {
+                    Button("Cancel") { store.windowPeek.hide(); store.cancelPreview() }
+                        .buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(.secondary).disabled(store.busy || store.editingDraft)
+                        .accessibilityLabel("Cancel preview")
+                }
+                Button { store.windowPeek.hide(); store.showingSettings.toggle() } label: {
+                    Image(systemName: store.showingSettings ? "xmark" : "gearshape").frame(width: 28, height: 28)
+                }.buttonStyle(.plain).foregroundStyle(.secondary).accessibilityLabel(store.showingSettings ? "Back to windows" : "Settings")
+                    .disabled(store.busy || store.editingDraft)
             }
-            if store.onboarding || store.showingSettings { SettingsPanel(store: store) }
-            else {
-                if let preview = store.preview {
-                    let screens = preview.plan.inventory.displays
-                    ScrollView(.horizontal, showsIndicators: screens.count > 2) {
-                        HStack(alignment: .top, spacing: 10) {
-                            ForEach(screens) { screen in
-                                DisplayCard(screen: screen, windows: preview.plan.inventory.windows, actions: preview.plan.actions, proposed: store.hasLayout)
-                                    .frame(width: screens.count == 1 ? 328 : 159)
-                            }
-                        }
-                    }.frame(height: screens.count > 2 ? 142 : 130)
-                } else {
-                    HStack(spacing: 20) {
-                        Image(systemName: "display").font(.system(size: 30, weight: .light))
-                        Spacer()
-                        Text(store.busy ? "Reading your displays…" : "Ready to arrange your windows").font(.system(size: 11)).foregroundStyle(.secondary)
-                    }.foregroundStyle(.secondary).padding(12).frame(height: 82)
-                        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
-                }
-                VStack(spacing: 10) {
-                    placement("Work", icon: "briefcase", selection: store.destination(\.workScreen))
-                    placement("Chat", icon: "bubble.left.and.bubble.right", selection: store.destination(\.chatScreen))
-                    placement("References", icon: "book", selection: store.destination(\.referenceScreen))
-                }.padding(11).background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 10)).disabled(store.busy)
-                DisclosureGroup("Custom instructions", isExpanded: $showCustom) {
-                    TextField("e.g. Keep Safari beside my editor", text: store.customInstructions, axis: .vertical)
-                        .lineLimit(2...4).textFieldStyle(.roundedBorder).padding(.top, 6)
-                        .accessibilityLabel("Custom instructions")
-                }.font(.system(size: 11)).foregroundStyle(.secondary).disabled(store.busy)
-                if store.hasLayout, let preview = store.preview {
-                    DisclosureGroup(isExpanded: $showChanges) {
-                        ScrollView {
-                            VStack(alignment: .leading, spacing: 10) {
-                                ForEach(preview.plan.actions) { a in
-                                    HStack(spacing: 8) {
-                                        Image(systemName: a.kind == "move" ? "arrow.up.right" : a.kind == "close" ? "xmark" : "minus").font(.system(size: 10)).frame(width: 12).foregroundStyle(.secondary)
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            Text(a.window.app_name).font(.system(size: 11, weight: .medium))
-                                            Text(a.window.title).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
-                                        }
-                                        Spacer()
-                                        Text(a.kind == "move" ? "Arrange" : a.kind == "close" ? "Close" : "Minimize").font(.system(size: 10)).foregroundStyle(.secondary)
-                                    }
-                                }
-                            }.padding(.top, 8).padding(.trailing, 4)
-                        }.frame(height: min(140, CGFloat(preview.action_count) * 38))
-                    } label: {
-                        let moved = preview.plan.actions.filter { $0.kind == "move" }.count
-                        Text("\(moved) to arrange · \(preview.plan.actions.filter { $0.kind == "close" }.count) to close").font(.system(size: 11)).foregroundStyle(.secondary)
+            if store.onboarding || store.showingSettings {
+                ScrollView { SettingsPanel(store: store).padding(.vertical, 4) }
+            } else {
+                DisplayGallery(store: store, captures: store.windowPreviews)
+                    .frame(maxHeight: .infinity)
+                if store.hasLayout {
+                    HStack(spacing: 8) {
+                        DraftTray(store: store, kind: "minimize")
+                        DraftTray(store: store, kind: "close")
                     }
                 }
-                HStack(spacing: 8) {
-                    if store.hasLayout {
-                        Button { showChanges = false; store.scan(layout: true) } label: { Image(systemName: "arrow.clockwise").frame(width: 24, height: 28) }
-                            .help("Refresh preview").accessibilityLabel("Refresh preview")
-                    } else {
-                        Button("Preview") { showChanges = false; store.scan(layout: true) }.controlSize(.large).accessibilityLabel("Preview layout")
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("How do you want to work?").font(.system(size: 11, weight: .medium))
+                    TextField("Keep my browser beside my terminal…", text: store.customInstructions, axis: .vertical)
+                        .lineLimit(2...2).textFieldStyle(.plain).font(.system(size: 12))
+                        .padding(10).background(.quaternary.opacity(0.2), in: RoundedRectangle(cornerRadius: 10))
+                        .accessibilityLabel("Layout instructions")
+                }.disabled(store.busy || store.editingDraft)
+                Button {
+                    store.windowPeek.hide()
+                    if store.hasLayout { store.apply() } else { store.scan(layout: true) }
+                } label: {
+                    HStack(spacing: 8) {
+                        if store.busy || store.editingDraft { ProgressView().controlSize(.small).tint(.white) }
+                        Text(store.busy ? "Preparing…" : store.editingDraft ? "Updating draft…" : store.hasLayout ? "Confirm arrangement" : store.hasStalePreview ? "Refresh arrangement" : "Arrange windows")
                     }
-                    Button { if store.hasLayout { store.apply(scope: "windows") } else { showChanges = false; store.tidy() } } label: {
-                        Text(store.hasLayout ? "Apply layout" : "Tidy windows").frame(maxWidth: .infinity, minHeight: 28)
-                    }.buttonStyle(.borderedProminent).controlSize(.large)
-                        .disabled(store.hasLayout && store.preview?.action_count == 0)
-                }.disabled(store.busy)
-                Divider()
-                HStack(spacing: 10) {
-                    Image(systemName: "photo.on.rectangle").font(.system(size: 17)).foregroundStyle(.secondary)
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Desktop screenshots").font(.system(size: 12, weight: .medium))
-                        if let file = store.filePreview, let count = file.screenshot_count, let bytes = file.screenshot_bytes {
-                            Text("\(count.formatted()) older than \(file.plan.inventory.days) days · \(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file))")
-                                .font(.system(size: 10)).foregroundStyle(.secondary).monospacedDigit()
-                        } else { Text("Move old captures to Trash.").font(.system(size: 10)).foregroundStyle(.secondary) }
-                    }
-                    Spacer()
-                    Button(store.filePreview == nil ? "Scan" : "Review") {
-                        store.scan(layout: false) { if (store.filePreview?.screenshot_count ?? 0) > 0 { confirmCleanup = true } else { store.status = "No old screenshots to clean." } }
-                    }.controlSize(.small).disabled(store.busy)
-                }
-                if let preview = store.preview, !preview.coverage.errors.isEmpty {
-                    Text("Some window details are unavailable: " + preview.coverage.errors.map(\.app).joined(separator: ", "))
-                        .font(.system(size: 10)).foregroundStyle(.secondary)
-                }
-                if let error = store.error { Text(error).font(.system(size: 11)).foregroundStyle(.orange).textSelection(.enabled) }
-                if store.busy {
-                    HStack(spacing: 7) { ProgressView().controlSize(.small); Text(store.status).font(.system(size: 11)).foregroundStyle(.secondary) }
-                } else if !store.hasLayout {
-                    Text(store.status).font(.system(size: 11)).foregroundStyle(.secondary)
-                }
+                }.buttonStyle(TidyButtonStyle()).disabled(store.busy || store.editingDraft)
+                Text(store.error ?? store.status).font(.system(size: 10))
+                    .foregroundStyle(store.error == nil ? Color.secondary : .orange).lineLimit(2)
+                    .frame(maxWidth: .infinity, minHeight: 24, maxHeight: 24, alignment: .topLeading)
                 HStack(spacing: 6) {
                     Menu {
                         ForEach(store.settings.provider == "gateway" ? ["jev", "hybrid", "nemotron", "beam"] : ["nemotron", "beam"], id: \.self) { model in
@@ -444,29 +615,41 @@ struct Panel: View {
                                 do { try store.persist() } catch { store.error = error.localizedDescription }
                             }
                         }
-                    } label: { Label(modelTitle, systemImage: "bolt.fill") }.menuStyle(.borderlessButton).fixedSize().disabled(store.busy)
-                    if let ms = store.preview?.model?.latency_ms { Text(String(format: "%.2fs", Double(ms) / 1000)).monospacedDigit().foregroundStyle(.tertiary) }
+                    } label: { Label(modelTitle, systemImage: "bolt.fill") }.menuStyle(.borderlessButton).fixedSize().disabled(store.busy || store.editingDraft)
+                    if let ms = store.preview?.model?.latency_ms { Text(ms == 0 ? "Cached" : String(format: "%.2fs", Double(ms) / 1000)).foregroundStyle(.tertiary).monospacedDigit() }
                     Spacer()
-                    Button { store.undo() } label: { Label(store.journalScope == "screenshots" ? "Undo cleanup" : "Undo layout", systemImage: "arrow.uturn.backward") }
-                        .buttonStyle(.plain).disabled(store.busy || store.journal == nil)
-                    Menu { Button("Quit Desk Tidy") { NSApp.terminate(nil) } } label: { Image(systemName: "ellipsis").frame(width: 22, height: 20) }
+                    Button { store.windowPeek.hide(); store.undo() } label: { Label("Undo", systemImage: "arrow.uturn.backward") }
+                        .buttonStyle(.plain).disabled(store.busy || store.editingDraft || store.journal == nil)
+                    Menu { Button("Quit Fenlet") { NSApp.terminate(nil) } } label: { Image(systemName: "ellipsis").frame(width: 24, height: 22) }
                         .menuStyle(.borderlessButton).fixedSize().accessibilityLabel("More")
-                }.font(.system(size: 10)).foregroundStyle(.secondary)
+                }.font(.system(size: 10)).foregroundStyle(.secondary).frame(height: 22)
             }
-        }.padding(16).frame(width: 360)
-            .confirmationDialog("Move \((store.filePreview?.screenshot_count ?? 0).formatted()) old screenshots to Trash?", isPresented: $confirmCleanup, titleVisibility: .visible) {
-                Button("Move to Trash", role: .destructive) { store.apply(scope: "screenshots") }
-                Button("Cancel", role: .cancel) { }
-            } message: { Text("Only default-named screenshots directly on Desktop older than \(store.filePreview?.plan.inventory.days ?? 30) days. Undo puts them back. Other files stay where they are.") }
+        }.padding(16).frame(width: 420, height: 580).background(Color(nsColor: .windowBackgroundColor))
+            .coordinateSpace(name: "fenletDraft")
+            .onPreferenceChange(DraftTargets.self) { store.draftTargets = $0 }
+            .overlay(alignment: .topLeading) { DraftGhost(cursor: store.draftCursor, captures: store.windowPreviews).allowsHitTesting(false) }
+    }
+}
+
+struct DisplayPreferences: View {
+    @ObservedObject var store: Store
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Display preferences").font(.system(size: 12, weight: .semibold))
+            placement("Work", icon: "briefcase", selection: store.destination(\.workScreen))
+            placement("Chat", icon: "bubble.left.and.bubble.right", selection: store.destination(\.chatScreen))
+            placement("References", icon: "book", selection: store.destination(\.referenceScreen))
+            Text("Automatic adapts to every connected display, including a single screen.").font(.system(size: 10)).foregroundStyle(.secondary)
+        }.padding(12).background(.quaternary.opacity(0.2), in: RoundedRectangle(cornerRadius: 12))
     }
     private func placement(_ title: String, icon: String, selection: Binding<String>) -> some View {
         HStack {
-            Label(title, systemImage: icon).font(.system(size: 12))
+            Label(title, systemImage: icon).font(.system(size: 11))
             Spacer()
             Picker(title, selection: selection) {
                 Text("Automatic").tag("auto")
-                ForEach(store.preview?.plan.inventory.displays ?? []) { Text($0.name).tag($0.id) }
-            }.labelsHidden().frame(maxWidth: 160).controlSize(.small).accessibilityLabel("\(title) display")
+                ForEach(store.availableDisplays) { screen in Text(screen.name).tag(screen.id) }
+            }.labelsHidden().frame(maxWidth: 190).accessibilityLabel(title + " display")
         }
     }
 }
@@ -495,23 +678,21 @@ struct SettingsPanel: View {
                         }.controlSize(.small)
                     }
                 }
-                if !store.accessibility { Text("Enable Desk Tidy in Accessibility, then check again below.").font(.system(size: 11)).foregroundStyle(.secondary) }
+                if !store.accessibility { Text("Enable Fenlet in Accessibility, then check again below.").font(.system(size: 11)).foregroundStyle(.secondary) }
             }.padding(12).background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
+            if !store.onboarding { DisplayPreferences(store: store) }
             VStack(alignment: .leading, spacing: 10) {
                 Picker("Provider", selection: $store.settings.provider) {
                     Text("Vercel AI Gateway").tag("gateway")
                     Text("OpenRouter").tag("openrouter")
                 }
-                if store.keyConfigured { Label("API key saved", systemImage: "checkmark.circle.fill").foregroundStyle(.green) }
+                if store.keyConfigured { Label("Provider connected", systemImage: "checkmark.circle.fill").foregroundStyle(.green) }
                 SecureField(store.keyConfigured ? "Replace API key (optional)" : "API key", text: $apiKey)
                     .textFieldStyle(.roundedBorder)
                 Link("Get an API key ↗", destination: URL(string: store.settings.provider == "gateway" ? "https://vercel.com/ai-gateway" : "https://openrouter.ai/keys")!)
                     .font(.system(size: 11))
                 Text("Keys stay in Keychain. Layout requests send app names and window titles; file contents stay on your Mac.")
                     .font(.system(size: 10)).foregroundStyle(.secondary)
-            }
-            if !store.onboarding {
-                Stepper("Screenshots older than \(store.screenshotDays) days", value: $store.screenshotDays, in: 1...365)
             }
             HStack {
                 Label(cliInstalled ? "CLI & skill installed" : "Terminal & agents", systemImage: "terminal")
@@ -529,7 +710,7 @@ struct SettingsPanel: View {
                     }.controlSize(.small)
                 }
             }
-            if cliInstalled { Text("Run desk-tidy in a new Terminal.").font(.system(size: 10)).foregroundStyle(.secondary) }
+            if cliInstalled { Text("Run fenlet in a new Terminal.").font(.system(size: 10)).foregroundStyle(.secondary) }
             Button {
                 saving = true
                 Task {
@@ -545,12 +726,12 @@ struct SettingsPanel: View {
                 Text(saving ? "Connecting…" : store.onboarding ? "Save & check setup" : "Done").frame(maxWidth: .infinity, minHeight: 26)
             }.buttonStyle(.borderedProminent).controlSize(.large).disabled(saving)
             if let error = store.error { Text(error).font(.system(size: 11)).foregroundStyle(.orange) }
-            if store.onboarding { Button("Quit Desk Tidy") { NSApp.terminate(nil) }.buttonStyle(.plain).font(.system(size: 10)).foregroundStyle(.secondary) }
+            if store.onboarding { Button("Quit Fenlet") { NSApp.terminate(nil) }.buttonStyle(.plain).font(.system(size: 10)).foregroundStyle(.secondary) }
         }.font(.system(size: 12))
     }
 }
 
-@MainActor final class AppDelegate: NSObject, NSApplicationDelegate {
+@MainActor final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSWindowDelegate {
     let store = Store()
     var item: NSStatusItem!
     let popover = NSPopover()
@@ -559,24 +740,27 @@ struct SettingsPanel: View {
         NSApp.setActivationPolicy(.accessory)
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = item.button {
-            let icon = NSImage(systemSymbolName: "rectangle.3.group", accessibilityDescription: "Desk Tidy")
-            icon?.isTemplate = true; button.image = icon
+            let icon = FenletBrand.mark(size: 20, template: true)
+            button.image = icon
             button.target = self; button.action = #selector(toggle)
-            button.toolTip = "Desk Tidy"
+            button.toolTip = "Fenlet"
         }
         popover.behavior = .transient
+        popover.delegate = self
         let host = NSHostingController(rootView: Panel(store: store))
         host.sizingOptions = [.preferredContentSize]
         popover.contentViewController = host
-        popover.contentSize = NSSize(width: 360, height: 500)
+        popover.contentSize = NSSize(width: 420, height: 580)
         if CommandLine.arguments.contains("--preview-window") {
-            let window = NSWindow(contentRect: NSRect(x: 900, y: 300, width: 360, height: 540), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
-            window.title = "Desk Tidy"
+            let window = NSWindow(contentRect: NSRect(x: 900, y: 180, width: 420, height: 580), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+            window.title = "Fenlet"
             window.contentView = NSHostingView(rootView: Panel(store: store))
             window.isReleasedWhenClosed = false; window.makeKeyAndOrderFront(nil)
+            window.delegate = self
             previewWindow = window; NSApp.activate(ignoringOtherApps: true)
+            store.startPreviewUpdates()
         }
-        // Launch reads local state; only Preview and Tidy request a model.
+        // Launch and live updates only read. Arrange prepares a draft; Confirm applies it.
         store.checkSetup()
         if CommandLine.arguments.contains("--show") { DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { self.present() } }
     }
@@ -584,6 +768,13 @@ struct SettingsPanel: View {
         present()
         return true
     }
+    func popoverDidShow(_ notification: Notification) { store.startPreviewUpdates() }
+    func popoverDidClose(_ notification: Notification) { store.stopPreviewUpdates() }
+    func windowWillClose(_ notification: Notification) {
+        if notification.object as? NSWindow === previewWindow { store.stopPreviewUpdates() }
+    }
+    func windowDidMiniaturize(_ notification: Notification) { store.stopPreviewUpdates() }
+    func windowDidDeminiaturize(_ notification: Notification) { store.startPreviewUpdates() }
     func present() { if !popover.isShown, item != nil { toggle() } }
     @objc func toggle() {
         if popover.isShown { popover.performClose(nil) }
@@ -599,7 +790,8 @@ struct SettingsPanel: View {
     }
 }
 
-@main struct DeskTidy {
+#if !FENLET_UI_TEST
+@main struct Fenlet {
     @MainActor static func main() {
         let app = NSApplication.shared
         let delegate = AppDelegate()
@@ -607,3 +799,4 @@ struct SettingsPanel: View {
         withExtendedLifetime(delegate) { app.run() }
     }
 }
+#endif

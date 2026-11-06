@@ -4,14 +4,12 @@ import fcntl
 import json
 import os
 from pathlib import Path
-import stat
-import subprocess
 import time
 import uuid
 from dataclasses import dataclass
 
-from .core import SCREENSHOT, build_actions, fingerprint, same_bounds, valid_bounds, fits_tile, frames_overlap, eligible_windows, constrained_tiles, layout_report
-from .runtime import STATE, native, native_window_batch, private_dir, run_json, write_json, replace_private_json, native_json
+from .core import build_actions, same_bounds, valid_bounds, fits_tile, frames_overlap, eligible_windows, constrained_tiles, layout_report, revise_actions
+from .runtime import STATE, native_window_batch, private_dir, write_json, replace_private_json, native_json
 from .overlap import analyze_overlaps
 
 
@@ -27,11 +25,6 @@ def read_plan(path):
     p = json.loads(Path(path).read_text())
     if p.get("version") != 1 or not isinstance(p.get("id"), str) or len(p["id"]) != 32 or not all(c in "0123456789abcdef" for c in p["id"]):
         raise ValueError("Unrecognized plan. Generate a fresh preview.")
-    if Path(p["inventory"]["desktop"]) != Path.home() / "Desktop":
-        raise ValueError("Cleanup is restricted to your Desktop.")
-    days = p["inventory"]["days"]
-    if type(days) is not int or days < 1:
-        raise ValueError("Screenshot age must be at least one day.")
     known = {w["id"]: w for w in p["inventory"]["windows"]}
     seen = set()
     for a in p["actions"]:
@@ -51,6 +44,16 @@ def read_plan(path):
                 and target["y"] + target["height"] <= s["y"] + s["height"] + 1):
                 raise ValueError("Window target falls outside its display.")
     return p
+
+
+def revise_plan(path, operation, window_id, target=None):
+    before = read_plan(path)
+    if not 0 <= time.time() - before["inventory"]["created_at"] <= 900:
+        raise ValueError("Preview expired. Arrange again to make a fresh preview.")
+    actions = revise_actions(before["inventory"], before["actions"], operation, window_id, target)
+    new_path, plan = save_plan(before["inventory"], None, before["intent"], before["model"], actions=actions)
+    read_plan(new_path)
+    return summary(plan, new_path)
 
 
 @contextmanager
@@ -87,26 +90,11 @@ def window_matches(action, live):
                           else not live.get("minimized") and fits_tile(live["bounds"], action["target"])))
 
 
-def screenshot_ready(item, days):
-    path = Path(item["path"])
-    root = Path.home() / "Desktop"
-    if path.parent != root or not SCREENSHOT.fullmatch(path.name):
-        raise ValueError("Only default-named screenshots directly on Desktop can be cleaned.")
-    # Reject an aliased Desktop and symlinks; never recurse into a folder.
-    if root.is_symlink():
-        raise ValueError("Desktop is a symlink. Cleanup needs a real Desktop folder.")
-    s = path.lstat()
-    if not stat.S_ISREG(s.st_mode) or fingerprint(s) != item["fingerprint"]:
-        raise ValueError("Screenshot changed since preview. Scan again.")
-    if max(s.st_mtime, getattr(s, "st_birthtime", s.st_mtime)) >= time.time() - days * 86400:
-        raise ValueError("Screenshot is newer than the cleanup cutoff.")
 
 
 def summary(p, path):
     inv = p["inventory"]
     return {"plan_path": str(path), "plan": p, "window_count": len(inv["windows"]),
-            "screenshot_count": len(inv["screenshots"]) if inv.get("screenshots_scanned", True) else None,
-            "screenshot_bytes": sum(x["fingerprint"]["size"] for x in inv["screenshots"]) if inv.get("screenshots_scanned", True) else None,
             "action_count": len(p["actions"]), "model": p["model"], "scan_ms": inv["scan_ms"],
             "coverage": inv["coverage"]}
 
@@ -159,7 +147,7 @@ def apply_window_batch(p, f):
                 if w["bounds"][key] > a["target"][key] + 1:
                     minimum[key] = w["bounds"][key]
             windows.append({**w, "min_size": minimum})
-        targets = constrained_tiles(windows, screen["usable"])
+        targets = constrained_tiles(windows, screen["usable"], screen)
         constraint_path = STATE / "window-constraints.json"
         learned = json.loads(constraint_path.read_text()) if constraint_path.exists() else {}
         for w in windows:
@@ -222,61 +210,28 @@ def apply_window_batch(p, f):
         {"before": focus_before, "after": focus_after, "unchanged": focus_before == focus_after if known_focus else None}, timings)
 
 
-def apply(path, scope):
+def apply(path):
     started_at = time.monotonic()
     with operation_lock():
         p = read_plan(path)
-        if scope == "screenshots" and not p["inventory"].get("screenshots_scanned", True):
-            raise ValueError("Run cleanup first. Window layouts do not scan Desktop files.")
         if not 0 <= time.time() - p["inventory"]["created_at"] <= 900:
             raise ValueError("Preview expired after 15 minutes. Make a fresh preview.")
-        window_outcome = None
-        log = private_dir(STATE / "runs") / f"{p['id']}-{scope}.jsonl"
+        log = private_dir(STATE / "runs") / f"{p['id']}-windows.jsonl"
         fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        results = []
-        items = p["actions"] if scope == "windows" else p["inventory"]["screenshots"]
+        items = p["actions"]
         with os.fdopen(fd, "w") as f:
-            record(f, {"event": "begin", "at": time.time(), "plan_path": str(Path(path).resolve()), "scope": scope})
-            if scope == "windows":
-                window_outcome = apply_window_batch(p, f)
-                results = window_outcome.results
-            else:
-                helper = subprocess.Popen([native(), "trash"], stdin=subprocess.PIPE,
-                                          stdout=subprocess.PIPE, text=True, bufsize=1)
-                try:
-                    for index, item in enumerate(items):
-                        record(f, {"event": "started", "index": index, "item": item})
-                        try:
-                            screenshot_ready(item, p["inventory"]["days"])
-                            helper.stdin.write(json.dumps(item) + "\n")
-                            helper.stdin.flush()
-                            result = json.loads(helper.stdout.readline())
-                            if not result.get("ok"):
-                                raise ValueError(result.get("error", "Trash did not confirm completion."))
-                            if Path(item["path"]).exists():
-                                raise ValueError("Original file still exists. Inspect Trash before continuing.")
-                            result["fingerprint"] = fingerprint(Path(result["trashed_path"]).lstat())
-                            record(f, {"event": "finished", "index": index, "result": result})
-                            results.append(result)
-                        except Exception as e:
-                            record(f, {"event": "failed", "index": index, "error": str(e)})
-                            results.append({"ok": False, "error": str(e)})
-                            break
-                finally:
-                    helper.stdin.close()
-                    helper.wait(timeout=10)
-        checked = layout_report(window_outcome.inventory) if window_outcome else None
+            record(f, {"event": "begin", "at": time.time(), "plan_path": str(Path(path).resolve()), "scope": "windows"})
+            outcome = apply_window_batch(p, f)
+        results = outcome.results
         return {"journal_path": str(log), "succeeded": sum(r["ok"] for r in results),
-                "undoable": any((a["kind"] != "close" and not r.get("skipped") and not r.get("unchanged") and r.get("after"))
-                                if scope == "windows" else r.get("ok") for a, r in zip(items, results)),
-                "focus_check": window_outcome.focus_check if window_outcome else None,
-                "timings": window_outcome.timings if window_outcome else {},
+                "undoable": any(a["kind"] != "close" and not r.get("skipped") and not r.get("unchanged") and r.get("after") for a, r in zip(items, results)),
+                "focus_check": outcome.focus_check, "timings": outcome.timings,
                 "failed": sum(not r["ok"] for r in results), "planned": len(items), "results": results,
                 "apply_ms": round((time.monotonic() - started_at) * 1000),
-                "layout_check": checked,
-                "closed": sum(r.get("applied_kind", a["kind"]) == "close" and r["ok"] and not r.get("unchanged") for a, r in zip(items, results)) if scope == "windows" else 0,
-                "minimized": sum(r.get("applied_kind", a["kind"]) == "minimize" and r["ok"] and not r.get("unchanged") for a, r in zip(items, results)) if scope == "windows" else 0,
-                "arranged": sum(r.get("applied_kind", a["kind"]) == "move" and r["ok"] and not r.get("unchanged") for a, r in zip(items, results)) if scope == "windows" else 0}
+                "layout_check": layout_report(outcome.inventory),
+                "closed": sum(r.get("applied_kind", a["kind"]) == "close" and r["ok"] and not r.get("unchanged") for a, r in zip(items, results)),
+                "minimized": sum(r.get("applied_kind", a["kind"]) == "minimize" and r["ok"] and not r.get("unchanged") for a, r in zip(items, results)),
+                "arranged": sum(r.get("applied_kind", a["kind"]) == "move" and r["ok"] and not r.get("unchanged") for a, r in zip(items, results))}
 
 
 def undo(path):
@@ -293,31 +248,11 @@ def undo(path):
             elif entry["event"] == "finished":
                 finished[entry["index"]] = entry["result"]
         undone = {e["index"] for e in entries if e["event"] == "undone"}
-        scope = entries[0]["scope"]
-        restored, skipped = 0, []
+        if entries[0]["scope"] != "windows":
+            raise ValueError("Only window-layout journals are supported.")
         with open(path, "a") as f:
-            if scope == "windows":
-                undo_started = {e["index"] for e in entries if e["event"] == "undo_started"}
-                return undo_window_batch(started, finished, expected, undone, undo_started, f)
-            for index in sorted(finished, reverse=True):
-                if index in undone:
-                    continue
-                item, result = started[index], finished[index]
-                try:
-                    src, dst = Path(result["trashed_path"]), Path(item["path"])
-                    if dst.parent != Path.home() / "Desktop" or not SCREENSHOT.fullmatch(dst.name):
-                        raise ValueError("Restore destination is not a Desktop screenshot.")
-                    if src.is_symlink() or fingerprint(src.lstat()) != result["fingerprint"]:
-                        raise ValueError("File in Trash changed; restore it manually.")
-                    os.link(src, dst, follow_symlinks=False)  # exclusive: never overwrite a new file
-                    src.unlink()
-                    record(f, {"event": "undone", "index": index})
-                    restored += 1
-                except Exception as e:
-                    skipped.append({"index": index, "reason": str(e)})
-        unresolved = len(set(started) - set(finished))
-        return {"restored": restored, "skipped": skipped, "unresolved": unresolved,
-                "note": "Interrupted actions need manual inspection." if unresolved else ""}
+            undo_started = {e["index"] for e in entries if e["event"] == "undo_started"}
+            return undo_window_batch(started, finished, expected, undone, undo_started, f)
 
 
 def undo_window_batch(started, finished, expected, undone, undo_started, journal):

@@ -11,16 +11,16 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from desk_tidy import runtime, operations
-from desk_tidy.core import same_bounds
+from fenlet import runtime, operations
+from fenlet.core import same_bounds
 
 
 def main():
     started = time.monotonic()
     report = {}
-    with tempfile.TemporaryDirectory(prefix="desk-tidy-native-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="fenlet-native-") as temporary:
         directory = Path(temporary)
-        executable = directory / "DeskTidyFixture"
+        executable = directory / "FenletFixture"
         subprocess.run(["xcrun", "swiftc", "-O", "-import-objc-header", str(ROOT / "native/Bridge.h"),
                         str(ROOT / "native/Fixture.swift"), "-o", str(executable)], check=True)
         focus = runtime.native_json("focus")
@@ -79,7 +79,7 @@ def main():
             assert minimized.results[before_min["id"]].get("minimized"), minimized.results
             assert before_min["id"] not in {w["id"] for w in minimized.inventory["windows"]}, "Dock animation became a fixed layout obstacle."
             # Use the production journal reader and batched Undo, including a moved window.
-            with patch("desk_tidy.operations.STATE", directory / "state"):
+            with patch("fenlet.operations.STATE", directory / "state"):
                 journal = directory / "roundtrip.jsonl"
                 entries = [{"event": "begin", "scope": "windows"}]
                 for index, (original, result) in enumerate([(windows[0], renamed.results[current[0]["id"]]), (before_min, minimized.results[before_min["id"]])]):

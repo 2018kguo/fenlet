@@ -8,8 +8,8 @@ import sys
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from desk_tidy.core import build_actions
-from desk_tidy.overlap import analyze_overlaps
+from fenlet.core import build_actions
+from fenlet.overlap import analyze_overlaps
 
 
 def measure(function):
@@ -28,6 +28,8 @@ for count in (16, 128, 1024, 8192):
                 "is_focused": i == 0, "minimized": False, "accessible": True,
                 "bounds": {"x": 0, "y": 0, "width": 800, "height": 600}} for i in range(count)]
     inv = {"windows": windows, "displays": [{"id": "screen", "name": "Synthetic display", "built_in": True,
+            "bounds": {"x": 0, "y": 0, "width": 2560, "height": 1440},
+            "physical_size_mm": {"width": 598, "height": 336}, "physical_size_source": "system_reported",
             "usable": {"x": 0, "y": 30, "width": 2560, "height": 1440}}]}
     decisions = [{"id": w["id"], "role": "display_screen"} for w in windows]
     actions, plan_ms = measure(lambda: build_actions(inv, decisions))

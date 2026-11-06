@@ -7,4 +7,4 @@ while [ -L "$TASK_SCRIPT" ]; do
   case "$TASK_SCRIPT" in /*) ;; *) TASK_SCRIPT="$TASK_DIR/$TASK_SCRIPT" ;; esac
 done
 TASK_ROOT=$(CDPATH= cd "$(dirname "$TASK_SCRIPT")/../../.." && pwd)
-exec "$TASK_ROOT/bin/desk-tidy" "$@"
+exec "$TASK_ROOT/bin/fenlet" "$@"

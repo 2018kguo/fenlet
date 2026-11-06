@@ -2,8 +2,8 @@ from itertools import combinations
 import random
 import unittest
 
-from desk_tidy.core import frames_overlap
-from desk_tidy.overlap import analyze_overlaps
+from fenlet.core import frames_overlap
+from fenlet.overlap import analyze_overlaps
 
 
 class OverlapTest(unittest.TestCase):

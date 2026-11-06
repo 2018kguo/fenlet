@@ -9,7 +9,7 @@ let top = NSScreen.screens.first!.frame.maxY
 for index in 0..<3 {
     let window = NSWindow(contentRect: NSRect(x: 100 + index * 70, y: 150 + index * 40, width: 640, height: 480),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-    window.title = "Desk Tidy verification \(index)"
+    window.title = "Fenlet verification \(index)"
     window.isReleasedWhenClosed = false
     window.minSize = NSSize(width: index == 2 ? 700 : 300, height: 240)
     window.isDocumentEdited = index == 2
@@ -24,7 +24,7 @@ func reply() {
         let frame = w.frame
         return ["id": "w-\(w.windowNumber)", "pid": pid,
                 "process_instance": "macos-proc-v1:\(info.pbi_start_tvsec):\(info.pbi_start_tvusec)",
-                "app_name": "DeskTidyFixture", "title": w.title, "title_source": "cg",
+                "app_name": "FenletFixture", "title": w.title, "title_source": "cg",
                 "bounds": ["x": frame.minX, "y": top - frame.maxY, "width": frame.width, "height": frame.height],
                 "minimized": w.isMiniaturized, "hidden": false, "is_focused": false]
     }
@@ -36,7 +36,7 @@ DispatchQueue.global().async {
     while let line = readLine() {
         DispatchQueue.main.async {
             if line == "quit" { app.terminate(nil) }
-            if line == "rename" { windows[0].title = "Desk Tidy verification renamed" }
+            if line == "rename" { windows[0].title = "Fenlet verification renamed" }
             reply()
         }
     }

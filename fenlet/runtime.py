@@ -5,7 +5,6 @@ import json
 import os
 import plistlib
 from pathlib import Path
-import stat
 import subprocess
 import time
 import urllib.error
@@ -14,11 +13,11 @@ import atexit
 import select
 import threading
 
-from .core import SCREENSHOT, fingerprint, model_state, validate_decisions, available_roles, eligible_windows
+from .core import model_state, validate_decisions, available_roles, eligible_windows
 from .questions import ESCALATE_BELOW_PROBABILITY, placements, jev_payload
 
 ROOT = Path(__file__).resolve().parents[1]
-STATE = Path(os.environ.get("DESK_TIDY_STATE", Path.home() / ".local/state/desk-tidy"))
+STATE = Path(os.environ.get("FENLET_STATE", Path.home() / ".local/state/fenlet"))
 MODELS = {"nemotron": "nvidia/nemotron-3.5-super-vl", "beam": "reflection/beam",
           "jev": "typesafe-ai/jev-1.14.0", "hybrid": "Jev + Nemotron"}
 INSTRUCTIONS = (
@@ -152,8 +151,8 @@ def doctor(provider="gateway"):
     has_key = bool(provider_key(provider))
     return {"runtime_ready": True, "accessibility": permissions["accessibility"],
             "key_configured": has_key, "provider": provider,
-            "next_steps": (["Allow Desk Tidy (or your terminal) in System Settings → Privacy & Security → Accessibility."] if not permissions["accessibility"] else [])
-            + (["Run desk-tidy setup to add your provider API key, or add it in the widget."] if not has_key else [])}
+            "next_steps": (["Allow Fenlet (or your terminal) in System Settings → Privacy & Security → Accessibility."] if not permissions["accessibility"] else [])
+            + (["Run fenlet setup to add your provider API key, or add it in the widget."] if not has_key else [])}
 
 
 def save_provider_key(provider, key):
@@ -173,8 +172,8 @@ def owned_bundle(path):
 
 
 def install_skill():
-    candidate = ROOT / "skills/desk-tidy"
-    destination = Path.home() / ".codex/skills/desk-tidy"
+    candidate = ROOT / "skills/fenlet"
+    destination = Path.home() / ".codex/skills/fenlet"
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.is_symlink():
         if destination.resolve() == candidate.resolve():
@@ -189,14 +188,14 @@ def install_skill():
 
 
 def install_cli():
-    candidate = ROOT / "bin/desk-tidy"
-    destination = Path.home() / ".local/bin/desk-tidy"
+    candidate = ROOT / "bin/fenlet"
+    destination = Path.home() / ".local/bin/fenlet"
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.is_symlink():
         if destination.resolve() == candidate.resolve():
             return str(destination)
         # Only replace this project's old skill launcher during its migration.
-        old = ROOT / "skills/desk-tidy/scripts/desk-tidy"
+        old = ROOT / "skills/fenlet/scripts/fenlet"
         if destination.resolve() != old.resolve() and not owned_bundle(destination.resolve()):
             raise ValueError(f"{destination} belongs to another install; left it alone.")
         destination.unlink()
@@ -209,7 +208,7 @@ def install_cli():
         existing = profile.read_text() if profile.exists() else ""
         if line not in existing:
             with open(profile, "a") as f:
-                f.write("\n# Desk Tidy CLI\n" + line + "\n")
+                f.write("\n# Fenlet CLI\n" + line + "\n")
     return str(destination)
 
 
@@ -234,11 +233,11 @@ def native():
     return str(binary)
 
 
-def inventory(days=30, *, include_screenshots=True):
+def inventory():
     start = time.monotonic()
     observed = native_json("inventory")
     displays, windows = observed["displays"], observed["windows"]
-    candidates = [w for w in windows if w["app_name"] not in ("Desk Tidy", "Google Chrome for Testing")]
+    candidates = [w for w in windows if w["app_name"] not in ("Fenlet", "Google Chrome for Testing")]
     constraints_path = STATE / "window-constraints.json"
     constraints = json.loads(constraints_path.read_text()) if constraints_path.exists() else {}
     # CG already supplies current rectangles. Avoid querying every app's AX
@@ -260,23 +259,12 @@ def inventory(days=30, *, include_screenshots=True):
         if learned:
             w["min_size"] = learned
     # Opening the popover should not make the user's underlying work lose priority.
-    prior_pid = os.environ.get("DESK_TIDY_FRONTMOST_PID")
+    prior_pid = os.environ.get("FENLET_FRONTMOST_PID")
     prior_windows = [w for w in windows if str(w["pid"]) == prior_pid and not w.get("minimized")]
     if prior_windows and not any(w.get("is_focused") for w in windows):
         prior_windows[0]["is_focused"] = True
-    desktop_path = Path.home() / "Desktop"
-    screenshots = []
-    now = time.time()
-    for path in desktop_path.iterdir() if include_screenshots and desktop_path.is_dir() else []:
-        if not SCREENSHOT.fullmatch(path.name):
-            continue
-        s = path.lstat()
-        if stat.S_ISREG(s.st_mode) and max(s.st_mtime, getattr(s, "st_birthtime", s.st_mtime)) < now - days * 86400:
-            screenshots.append({"path": str(path), "fingerprint": fingerprint(s)})
-    return {"created_at": now, "displays": displays, "windows": windows,
+    return {"created_at": time.time(), "displays": displays, "windows": windows,
             "coverage": observed["coverage"],
-            "desktop": str(desktop_path), "days": days,
-            "screenshots": screenshots, "screenshots_scanned": include_screenshots,
             "scan_ms": round((time.monotonic() - start) * 1000)}
 
 
@@ -314,7 +302,7 @@ def decide(inv, intent, model="jev", provider="gateway", *, use_cache=False):
         return request_decisions(inv, intent, model, provider)
     state = model_state(inv, intent)
     state["windows"].sort(key=lambda w: w["id"])
-    revision = hashlib.sha256((ROOT / "desk_tidy/questions.py").read_bytes() + INSTRUCTIONS.encode()).hexdigest()
+    revision = hashlib.sha256((ROOT / "fenlet/questions.py").read_bytes() + INSTRUCTIONS.encode()).hexdigest()
     key = hashlib.sha256(json.dumps({"state": state, "options": placements(inv), "model": MODELS[model], "provider": provider,
         "revision": revision, "identities": sorted((w["id"], w.get("process_instance")) for w in eligible_windows(inv))}, sort_keys=True).encode()).hexdigest()
     path = private_dir(STATE / "decision-cache") / (key + ".json")
@@ -344,7 +332,7 @@ def request_decisions(inv, intent, model="jev", provider="gateway"):
     key_name = "AI_GATEWAY_API_KEY" if provider == "gateway" else "OPENROUTER_API_KEY"
     key = provider_key(provider)
     if not key:
-        raise ValueError(f"Set {key_name}, or pass --env-file with that key. Scan and cleanup work offline.")
+        raise ValueError(f"Set {key_name}, or pass --env-file with that key. Scan and snap work offline.")
     model_id = MODELS[model]
     if provider == "openrouter" and model == "beam":
         model_id = "reflection/beam-1.0-501b-a23b"
