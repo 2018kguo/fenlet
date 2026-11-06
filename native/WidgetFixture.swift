@@ -12,7 +12,7 @@ import SwiftUI
         store.liveInventory = preview.plan.inventory
         store.preview = preview; store.hasLayout = true; store.liveReadOK = true
         store.settings.customInstructions = "Keep my browser beside my terminal. Put chat on another display when there is room."
-        let window = NSWindow(contentRect: NSRect(x: 100, y: 180, width: 420, height: 580), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: NSRect(x: 100, y: 180, width: 420, height: store.panelHeight), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "Fenlet layout verification"
         window.contentView = NSHostingView(rootView: Panel(store: store))
         window.isReleasedWhenClosed = false; window.orderFrontRegardless()

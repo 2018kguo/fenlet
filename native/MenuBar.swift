@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import ApplicationServices
+import Combine
 
 struct Bounds: Decodable, Equatable { let x, y, width, height: Double }
 struct PhysicalSize: Decodable, Equatable { let width, height: Double }
@@ -168,6 +169,12 @@ enum TidyError: LocalizedError {
         + "Additional user preferences take priority: \(settings.customInstructions ?? "")"
     }
     var availableDisplays: [ScreenInfo] { liveInventory?.displays ?? preview?.plan.inventory.displays ?? [] }
+    static func panelHeight(for inventory: InventoryInfo?) -> CGFloat {
+        guard let screens = inventory?.displays, !screens.isEmpty else { return 550 }
+        if screens.count == 1 || screens.count > 2 { return 567 }
+        return screens.contains(where: { $0.bounds.height > $0.bounds.width }) ? 543 : 505
+    }
+    var panelHeight: CGFloat { Self.panelHeight(for: liveInventory) }
     var hasStalePreview: Bool { !hasLayout && preview?.plan.actions.isEmpty == false }
     var hasDraft: Bool { preview?.plan.actions.isEmpty == false }
     func cancelPreview() { desktopRevision += 1; hasLayout = false; preview = nil; draggedWindowID = nil; draftCursor.position = nil; draftTarget = nil; editingDraft = false; status = "Ready to arrange." }
@@ -203,12 +210,14 @@ enum TidyError: LocalizedError {
             guard let selected = self.settings[keyPath: key], self.availableDisplays.contains(where: { $0.id == selected }) else { return "auto" }
             return selected
         }, set: {
+            guard self.settings[keyPath: key] != $0 else { return }
             self.settings[keyPath: key] = $0; self.desktopRevision += 1; self.hasLayout = false
             do { try self.persist() } catch { self.error = error.localizedDescription }
         })
     }
     var customInstructions: Binding<String> {
         Binding(get: { self.settings.customInstructions ?? "" }, set: {
+            guard (self.settings.customInstructions ?? "") != $0 else { return }
             self.settings.customInstructions = $0; self.desktopRevision += 1; self.hasLayout = false
             self.instructionSaveTask?.cancel()
             self.instructionSaveTask = Task {
@@ -285,7 +294,7 @@ enum TidyError: LocalizedError {
             defer { busy = false }
             do {
                 let data = try await Self.command(layout ? layoutArguments("plan") : ["scan"], settings: settings, frontmostPid: frontmostPid)
-                guard revision == desktopRevision else { return }
+                guard revision == desktopRevision else { status = "Ready to arrange."; return }
                 let inventory: InventoryInfo
                 if layout {
                     let response = try JSONDecoder().decode(Envelope<PreviewInfo>.self, from: data)
@@ -624,7 +633,7 @@ struct Panel: View {
                         .menuStyle(.borderlessButton).fixedSize().accessibilityLabel("More")
                 }.font(.system(size: 10)).foregroundStyle(.secondary).frame(height: 22)
             }
-        }.padding(16).frame(width: 420, height: 580).background(Color(nsColor: .windowBackgroundColor))
+        }.padding(16).frame(width: 420, height: store.panelHeight).background(Color(nsColor: .windowBackgroundColor))
             .coordinateSpace(name: "fenletDraft")
             .onPreferenceChange(DraftTargets.self) { store.draftTargets = $0 }
             .overlay(alignment: .topLeading) { DraftGhost(cursor: store.draftCursor, captures: store.windowPreviews).allowsHitTesting(false) }
@@ -736,6 +745,7 @@ struct SettingsPanel: View {
     var item: NSStatusItem!
     let popover = NSPopover()
     var previewWindow: NSWindow?
+    private var sizeWatcher: AnyCancellable?
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -750,15 +760,24 @@ struct SettingsPanel: View {
         let host = NSHostingController(rootView: Panel(store: store))
         host.sizingOptions = [.preferredContentSize]
         popover.contentViewController = host
-        popover.contentSize = NSSize(width: 420, height: 580)
+        popover.contentSize = NSSize(width: 420, height: store.panelHeight)
         if CommandLine.arguments.contains("--preview-window") {
-            let window = NSWindow(contentRect: NSRect(x: 900, y: 180, width: 420, height: 580), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+            let window = NSWindow(contentRect: NSRect(x: 900, y: 180, width: 420, height: store.panelHeight), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
             window.title = "Fenlet"
             window.contentView = NSHostingView(rootView: Panel(store: store))
             window.isReleasedWhenClosed = false; window.makeKeyAndOrderFront(nil)
             window.delegate = self
             previewWindow = window; NSApp.activate(ignoringOtherApps: true)
             store.startPreviewUpdates()
+        }
+        sizeWatcher = store.$liveInventory.map { Store.panelHeight(for: $0) }.removeDuplicates().sink { [weak self] height in
+            guard let self else { return }
+            self.popover.contentSize = NSSize(width: 420, height: height)
+            if let window = self.previewWindow {
+                let top = window.frame.maxY
+                window.setContentSize(NSSize(width: 420, height: height))
+                window.setFrameOrigin(NSPoint(x: window.frame.minX, y: top - window.frame.height))
+            }
         }
         // Launch and live updates only read. Arrange prepares a draft; Confirm applies it.
         store.checkSetup()

@@ -38,10 +38,10 @@ def controls(data):
     return {name: value["bounds"] for name, value in found.items()}
 
 
-def fixture(count):
+def fixture(count, allow_portrait=True):
     screens, windows, decisions = [], [], []
     for index in range(count):
-        portrait = index % 2 == 1
+        portrait = allow_portrait and index % 2 == 1
         bounds = dict(x=index * 2600, y=0, width=1200 if portrait else 2560, height=1920 if portrait else 1440)
         screen = dict(id=f"screen-{index}", name=f"Display {index + 1}", built_in=count == 1, bounds=bounds,
                       usable={**bounds, "y": 30, "height": bounds["height"] - 60},
@@ -74,9 +74,11 @@ def main():
         subprocess.run(["xcrun", "swiftc", "-O", "-D", "FENLET_UI_TEST", "-parse-as-library",
                         *[str(ROOT / "native" / file) for file in ("MenuBar.swift", "WindowPreviews.swift", "DraftEditing.swift", "Brand.swift", "WidgetFixture.swift")],
                         "-o", str(executable), "-framework", "SwiftUI", "-framework", "Security", "-framework", "ScreenCaptureKit"], check=True)
-        for count in args.counts:
+        cases = [(count, True) for count in args.counts]
+        if 2 in args.counts: cases.append((2, False))
+        for count, allow_portrait in cases:
             path = directory / "input.json"
-            preview = fixture(count)
+            preview = fixture(count, allow_portrait)
             plan = dict(version=1, id=uuid.uuid4().hex, intent="Synthetic widget test", model=None, **preview["plan"])
             plan_path = directory / "plan.json"; plan_path.write_text(json.dumps(plan))
             preview["plan_path"] = str(plan_path); path.write_text(json.dumps(preview))
@@ -131,10 +133,11 @@ def main():
                         time.sleep(.1)
                 if args.output:
                     args.output.mkdir(parents=True, exist_ok=True)
-                    (args.output / f"widget-{count}.json").write_text(json.dumps(data, indent=2))
-                    capture = subprocess.run(["peekaboo", "see", "--window-id", str(window), "--path", str(args.output / f"widget-{count}.png"), "--json"], capture_output=True, text=True)
+                    name = f"widget-{count}" + ("-landscape" if not allow_portrait else "")
+                    (args.output / f"{name}.json").write_text(json.dumps(data, indent=2))
+                    capture = subprocess.run(["peekaboo", "see", "--window-id", str(window), "--path", str(args.output / f"{name}.png"), "--json"], capture_output=True, text=True)
                     assert json.loads(capture.stdout).get("success"), capture.stdout
-                report.append(dict(displays=count, controls_visible=True, controls_pinned=True, last_display_reachable=True, drag_swap_saved=True if count == 1 else None))
+                report.append(dict(displays=count, portrait_included=allow_portrait and count > 1, controls_visible=True, controls_pinned=True, last_display_reachable=True, drag_swap_saved=True if count == 1 else None))
             finally:
                 if process.poll() is None: process.terminate()
                 process.wait(timeout=3); process.stdout.close()
