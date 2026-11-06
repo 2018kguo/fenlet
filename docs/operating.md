@@ -25,16 +25,45 @@ PATH and links the included skill into `~/.codex/skills/fenlet`. Open a new
 terminal after installing. Agents with another skill directory can install
 from the public repository instead.
 
+## Gather windows from other Spaces
+
+Choose **All Spaces** in the widget, then **Laptop** in the destination menu
+(or any connected display). **Arrange windows** prepares an editable draft;
+**Confirm arrangement** brings the selected windows onto that display's regular
+Desktop and tiles them. Fullscreen apps leave fullscreen on confirmation.
+A live overview shows separate thumbnails for windows from different Spaces.
+
+For an offline preview of the same operation:
+
+```sh
+fenlet tile --all-spaces --display laptop
+fenlet apply PLAN_PATH --yes
+```
+
+Add `--all-spaces --display laptop` to `plan` or `arrange` to also classify
+background windows and clutter. Omit `--display` to use the usual display roles.
+**Current Space** remains the default. Previewing never switches Spaces or
+leaves fullscreen. Confirmation may briefly animate a fullscreen transition;
+Fenlet never activates or raises another app to arrange it.
+
+All Spaces uses optional, undocumented macOS window-management APIs; no root
+helper, SIP changes, or extra installation is required. Availability can change
+with macOS. Discovery is bounded, and windows that cannot be resolved are
+reported rather than moved speculatively. Hidden/minimized apps and windows
+pinned to multiple Spaces are excluded. The destination must have an existing
+regular Desktop. Fenlet does not create, delete, or reorder regular Desktops.
+
 ## Windows that cannot change
 
-Fenlet works on visible windows in the current Spaces. Fullscreen windows,
-other Spaces, dialogs, inaccessible apps, and unsaved documents may need to
-be handled in their own app. The final report says what could not be changed.
-Fenlet never force-quits an app or clicks Discard.
+Dialogs, inaccessible windows and unsaved documents stay open. The final report
+says what could not be changed. Fenlet never force-quits an app or clicks Discard.
 
 **Undo** restores moves and minimizes that have not been changed since the
 run. Closing a window cannot always be undone. A fresh preview preserves
-subsequent manual moves and changes to connected displays.
+subsequent manual moves and changes to connected displays. Undo also restores
+original Space membership and fullscreen state. macOS creates a new fullscreen
+Space when restoring it, so its numeric ID and position may differ. A Space
+that was deleted after the run cannot be restored.
 
 ## Models, data, and cost
 

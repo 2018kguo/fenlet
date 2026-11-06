@@ -34,6 +34,10 @@ def same_bounds(a, b, tolerance=3):
     return all(abs(a[k] - b[k]) <= tolerance for k in ("x", "y", "width", "height"))
 
 
+def same_space_state(a, b):
+    return all(a.get(k) == b.get(k) for k in ("space_ids", "fullscreen") if k in a or k in b)
+
+
 def valid_bounds(b):
     return (isinstance(b, dict) and set(b) == {"x", "y", "width", "height"}
             and all(type(v) in (int, float) and math.isfinite(v) for v in b.values())
@@ -87,7 +91,7 @@ def validate_decisions(windows, decisions, roles):
 
 
 def model_state(inventory, intent):
-    return {"intent": intent,
+    return {"intent": intent, "all_spaces": inventory.get("all_spaces", False),
             "displays": [{k: s[k] for k in ("id", "name", "built_in", "usable")}
                          for s in inventory["displays"]],
             "windows": [{**{k: w.get(k) for k in ("id", "app_name", "title", "is_focused")},
@@ -344,7 +348,7 @@ def build_actions(inventory, decisions, layout_order=None):
     actions = []
     groups = {screen_key(s): [] for s in screens}
     screens_by_role = {screen_key(s): s for s in screens}
-    fixed = [w["bounds"] for w in windows if roles[w["id"]] == "unchanged"]
+    fixed_windows = [w for w in windows if roles[w["id"]] == "unchanged"]
     for w in windows:
         role = roles[w["id"]]
         if w["is_focused"] and role in ("close", "minimize"):
@@ -359,6 +363,8 @@ def build_actions(inventory, decisions, layout_order=None):
         group = [w for w in group if w["is_focused"]] + [w for w in group if not w["is_focused"]]
         screen = screens_by_role[role]
         minimum = {axis: min(window_minimum(w)[axis] for w in group) for axis in ("width", "height")}
+        fixed = [w["bounds"] for w in fixed_windows if not inventory.get("all_spaces")
+                 or screen.get("gather_space") in w.get("space_ids", [])]
         packed, overflow_windows = pack_regions(group, free_regions(screen["usable"], fixed, minimum), screen, order)
         if order is None:
             packed = preserve_fitting_placements(packed)
@@ -367,8 +373,12 @@ def build_actions(inventory, decisions, layout_order=None):
                 raise ValueError("The focused window cannot fit this display. Choose a larger display.")
             actions.append({"kind": "minimize", "window": overflow, "reason": "No remaining pane fits this window's minimum size."})
         for w, target in packed:
+            gathering = inventory.get("all_spaces", False)
+            if gathering and not screen.get("gather_space"):
+                raise ValueError("This display has no regular destination Space. Choose another display.")
             actions.append({"kind": "move", "window": w, "target": target,
-                            "display": screen["id"], "display_name": screen["name"]})
+                            "display": screen["id"], "display_name": screen["name"],
+                            **({"target_space": screen["gather_space"]} if gathering else {})})
     # Remove reviewed clutter before laying out the active windows.
     return sorted(actions, key=lambda a: a["kind"] == "move")
 

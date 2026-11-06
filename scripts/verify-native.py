@@ -12,7 +12,74 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from fenlet import runtime, operations
-from fenlet.core import same_bounds
+from fenlet.core import same_bounds, frames_overlap
+
+
+def verify_spaces(fixture, references, directory):
+    """Three owned windows across a Desktop and two fullscreen app Spaces."""
+    normal_id = references("state")[0]["id"]
+    normal = next(w for w in runtime.inventory(all_spaces=True)["windows"] if w["id"] == normal_id and w["pid"] == fixture.pid)
+    closed = runtime.native_window_batch([{"kind": "close", "window": normal}])
+    assert closed.results[normal["id"]].get("closed"), closed.results
+    references("renew")
+    references("fullscreen")
+    ids = {w["id"] for w in references("state")}
+    second = subprocess.Popen([str(directory / "FenletFixture")], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    def second_refs(command=None):
+        if command:
+            second.stdin.write(command+"\n"); second.stdin.flush()
+        if not select.select([second.stdout], [], [], 6)[0]:
+            raise TimeoutError("Second fullscreen fixture did not respond.")
+        return json.loads(second.stdout.readline())
+    try:
+        other = second_refs()
+        ids.add(other[0]["id"])
+        second_refs("fullscreen")
+        deadline = time.monotonic() + 6
+        while True:
+            inv = runtime.inventory(all_spaces=True)
+            originals = [w for w in inv["windows"] if w["id"] in ids and w["pid"] in (fixture.pid, second.pid)]
+            if len(originals) == 3 and sum(w.get("fullscreen", False) for w in originals) == 2: break
+            if time.monotonic() >= deadline: raise AssertionError("Owned fullscreen windows were not discovered.")
+            time.sleep(.05)
+        assert len({s for w in originals for s in w["space_ids"]}) == 3
+        screen = next(s for s in inv["displays"] if s.get("built_in"))
+        area = screen["usable"]
+        width = (area["width"] - 18) / 2
+        height = (area["height"] - 18) / 2
+        targets = [dict(x=area["x"]+6, y=area["y"]+6, width=width, height=area["height"]-12),
+                   dict(x=area["x"]+12+width, y=area["y"]+6, width=width, height=height),
+                   dict(x=area["x"]+12+width, y=area["y"]+12+height, width=width, height=height)]
+        actions = [{"kind": "move", "window": w, "target": t, "target_space": screen["gather_space"]} for w, t in zip(originals, targets)]
+        # Same rectangle with changed membership/fullscreen must be rejected.
+        for field, value in (("space_ids", [0]), ("fullscreen", not originals[0]["fullscreen"])):
+            stale = runtime.native_window_batch([{**actions[0], "window": {**originals[0], field: value}}])
+            assert stale.results[originals[0]["id"]].get("skipped"), stale.results
+        started = time.monotonic()
+        gathered = runtime.native_window_batch(actions)
+        elapsed = round((time.monotonic()-started)*1000)
+        afters = [operations.observed_window(w, gathered.results[w["id"]]) for w in originals]
+        assert all(operations.window_matches(a, live) for a, live in zip(actions, afters)), gathered.results
+        assert all(not live["fullscreen"] and live["space_ids"] == [screen["gather_space"]] for live in afters)
+        assert not any(frames_overlap(a["bounds"], b["bounds"]) for i, a in enumerate(afters) for b in afters[i+1:])
+        journal = directory / "spaces-roundtrip.jsonl"
+        entries = [{"event": "begin", "scope": "windows"}]
+        for i, (a, after) in enumerate(zip(actions, afters)):
+            entries.extend([{"event": "started", "index": i, "item": a},
+                            {"event": "finished", "index": i, "result": {"ok": True, "after": after}}])
+        journal.write_text("".join(json.dumps(e)+"\n" for e in entries))
+        with patch("fenlet.operations.STATE", directory / "state"):
+            undone = operations.undo(journal)
+            assert undone["restored"] == 3 and not undone["skipped"], {"summary": undone, "observations": [json.loads(line) for line in journal.read_text().splitlines() if json.loads(line)["event"] == "undo_observed"]}
+            assert operations.undo(journal)["restored"] == 0
+        return {"all_spaces_close_verified": True, "three_spaces_gathered": True, "gather_ms": elapsed, "overlaps": 0,
+                "stale_space_and_fullscreen_guard": True, "fullscreen_and_frame_undo": True}
+    finally:
+        if second.poll() is None:
+            second.stdin.write("quit\n"); second.stdin.flush()
+            try: second.wait(timeout=3)
+            except subprocess.TimeoutExpired: second.terminate(); second.wait(timeout=2)
+        second.stdin.close(); second.stdout.close()
 
 
 def main():
@@ -97,6 +164,8 @@ def main():
             assert closed.results[before_min["id"]].get("closed"), closed.results
             report["normal_close_verified"] = True
             assert runtime.native_json("focus") == focus, "Verification changed active focus."
+            if "--spaces" in sys.argv:
+                report["spaces"] = verify_spaces(fixture, references, directory)
         finally:
             if fixture.poll() is None:
                 fixture.stdin.write("quit\n"); fixture.stdin.flush()

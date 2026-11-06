@@ -10,6 +10,14 @@ from .operations import apply, read_plan, save_plan, summary, undo, audit_layout
 from .runtime import decide, inventory, load_env, doctor, save_provider_key, install_cli, install_skill, run_json, native
 
 
+def resolve_display(inventory, selector):
+    screen = next((s for s in inventory["displays"] if s["id"] == selector
+                   or selector == "laptop" and s.get("built_in")), None)
+    if screen is None:
+        raise ValueError("Display not found. Run fenlet scan for connected display IDs, or use --display laptop.")
+    return screen
+
+
 def main():
     parser = argparse.ArgumentParser(prog="fenlet", description="Arrange your Mac windows into useful panes.")
     parser.add_argument("--version", action="version", version=f"fenlet {__version__}")
@@ -17,14 +25,19 @@ def main():
     parser.add_argument("--json", action="store_true", help="Machine-readable output")
     sub = parser.add_subparsers(dest="command", required=True)
     scan = sub.add_parser("scan", help="Read current windows and displays, offline")
+    scan.add_argument("--all-spaces", action="store_true", help="Include windows on other Spaces and fullscreen apps")
     sub.add_parser("check", help="Measure actual visible window overlaps, offline")
     snap = sub.add_parser("snap", help="Instantly snap the focused window, offline")
     snap.add_argument("zone", choices=["left", "right", "top", "bottom", "full"])
     tile = sub.add_parser("tile", help="Tile visible windows with size-aware panes, offline")
+    tile.add_argument("--all-spaces", action="store_true", help="Gather windows from other Spaces, leaving fullscreen on confirmation")
+    tile.add_argument("--display", help="Gather onto this display ID, or laptop")
     tile.add_argument("--yes", action="store_true", help="Apply the layout immediately")
     for command in ("plan", "arrange"):
         plan = sub.add_parser(command, help="Preview a layout" if command == "plan" else "Plan and arrange windows in one command")
         plan.add_argument("intent", nargs="?", default=DEFAULT_INTENT)
+        plan.add_argument("--all-spaces", action="store_true", help="Include other Spaces; fullscreen windows leave fullscreen only on confirmation")
+        plan.add_argument("--display", help="Gather all roles onto this display ID, or laptop")
         plan.add_argument("--model", choices=["nemotron", "beam", "jev", "hybrid"], default="jev")
         plan.add_argument("--provider", choices=["gateway", "openrouter"], default="gateway")
         for purpose in ("work", "chat", "reference"):
@@ -59,10 +72,11 @@ def main():
         if args.command == "check":
             result = audit_layout()
         elif args.command in ("snap", "tile"):
-            inv = inventory()
+            inv = inventory(all_spaces=True) if args.command == "tile" and args.all_spaces else inventory()
+            destination = resolve_display(inv, args.display) if args.command == "tile" and args.display else None
             windows = eligible_windows(inv)
             if args.command == "tile":
-                decisions = [{"id": w["id"], "role": screen_key(screen_for_window(w, inv["displays"]))} for w in windows]
+                decisions = [{"id": w["id"], "role": screen_key(destination or screen_for_window(w, inv["displays"]))} for w in windows]
                 path, p = save_plan(inv, decisions, "Tile visible windows.", None)
                 result = apply(path) if args.yes else summary(p, path)
             else:
@@ -87,9 +101,10 @@ def main():
                     install_skill()
             result = doctor(args.provider)
         elif args.command in ("scan", "plan", "arrange"):
-            inv = inventory()
+            inv = inventory(all_spaces=True) if args.all_spaces else inventory()
             if args.command in ("plan", "arrange"):
-                inv["display_preferences"] = {"work": args.work_display, "chat": args.chat_display, "references": args.reference_display}
+                destination = resolve_display(inv, args.display)["id"] if args.display else None
+                inv["display_preferences"] = {"work": destination or args.work_display, "chat": destination or args.chat_display, "references": destination or args.reference_display}
             if args.command == "scan":
                 result = inv
             else:

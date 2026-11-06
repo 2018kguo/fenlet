@@ -23,11 +23,15 @@ On a Mac with Accessibility permission:
 
 ```sh
 python3 scripts/verify-native.py
+python3 scripts/verify-native.py --spaces
 ```
 
 This creates and removes its own windows, checks normal Close, unsaved-work
 protection, minimize/Undo, identity guards, and focus preservation. It never
-arranges other apps.
+arranges other apps. `--spaces` additionally opens two owned fullscreen Spaces,
+gathers three fixture windows onto one Desktop, verifies no overlaps and stale
+Space/fullscreen guards, then checks Undo. These fullscreen checks briefly
+switch Spaces; closing the fixture removes only its own fullscreen Spaces.
 
 With [Peekaboo](https://github.com/steipete/Peekaboo) installed and its desktop
 permissions granted:

@@ -13,6 +13,98 @@ if !Thread.isMultiThreaded() {
     while !bootstrap.isFinished { Thread.sleep(forTimeInterval: 0.001) }
 }
 
+// Optional WindowServer bridge. Unsupported systems retain current-Space mode.
+// Space membership is verified after a write; API delivery is never treated as proof.
+final class SpaceBridge: @unchecked Sendable {
+    static let shared = SpaceBridge()
+    private let lock = NSLock()
+    let transitionLock = NSLock()
+    private let connection: Int32
+    private let copyDisplays: (@convention(c) (Int32) -> Unmanaged<CFArray>?)?
+    private let copySpaces: (@convention(c) (Int32, Int32, CFArray) -> Unmanaged<CFArray>?)?
+    private let setCompat: (@convention(c) (Int32, UInt64, Int32) -> Int32)?
+    private let setWorkspace: (@convention(c) (Int32, UnsafePointer<UInt32>, Int32, Int32) -> Int32)?
+    private let moveManaged: (@convention(c) (Int32, CFArray, UInt64) -> Void)?
+    init() {
+        let handle = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY)
+        func symbol<T>(_ name: String, _ type: T.Type) -> T? {
+            guard let handle, let address = name.withCString({ dlsym(handle, $0) }) else { return nil }
+            return unsafeBitCast(address, to: type)
+        }
+        connection = symbol("SLSMainConnectionID", (@convention(c) () -> Int32).self)?() ?? 0
+        copyDisplays = symbol("SLSCopyManagedDisplaySpaces", (@convention(c) (Int32) -> Unmanaged<CFArray>?).self)
+        copySpaces = symbol("SLSCopySpacesForWindows", (@convention(c) (Int32, Int32, CFArray) -> Unmanaged<CFArray>?).self)
+        setCompat = symbol("SLSSpaceSetCompatID", (@convention(c) (Int32, UInt64, Int32) -> Int32).self)
+        setWorkspace = symbol("SLSSetWindowListWorkspace", (@convention(c) (Int32, UnsafePointer<UInt32>, Int32, Int32) -> Int32).self)
+        moveManaged = symbol("SLSMoveWindowsToManagedSpace", (@convention(c) (Int32, CFArray, UInt64) -> Void).self)
+    }
+    var available: Bool { connection != 0 && copyDisplays != nil && copySpaces != nil && ((setCompat != nil && setWorkspace != nil) || moveManaged != nil) }
+    func displays() -> [[String: Any]] {
+        guard available, let raw = copyDisplays?(connection)?.takeRetainedValue() else { return [] }
+        return raw as? [[String: Any]] ?? []
+    }
+    func spaces(_ id: UInt32) -> [UInt64]? {
+        guard available, let raw = copySpaces?(connection, 0x7, [NSNumber(value: id)] as CFArray)?.takeRetainedValue(),
+              let numbers = raw as? [NSNumber] else { return nil }
+        return numbers.map { $0.uint64Value }.sorted()
+    }
+    func types() -> [UInt64: Int] {
+        var result: [UInt64: Int] = [:]
+        for display in displays() {
+            for space in display["Spaces"] as? [[String: Any]] ?? [] {
+                if let id = space["ManagedSpaceID"] as? NSNumber, let type = space["type"] as? Int { result[id.uint64Value] = type }
+            }
+        }
+        return result
+    }
+    func currentSpaces() -> Set<UInt64> {
+        Set(displays().compactMap { (($0["Current Space"] as? [String: Any])?["ManagedSpaceID"] as? NSNumber)?.uint64Value })
+    }
+    func destinations() -> [String: UInt64] {
+        var result: [String: UInt64] = [:]
+        for display in displays() {
+            guard let name = display["Display Identifier"] as? String else { continue }
+            let spaces = display["Spaces"] as? [[String: Any]] ?? []
+            let current = display["Current Space"] as? [String: Any]
+            let target = current?["type"] as? Int == 0 ? current : spaces.first { $0["type"] as? Int == 0 }
+            if let id = target?["ManagedSpaceID"] as? NSNumber { result[name.uppercased()] = id.uint64Value }
+        }
+        return result
+    }
+    func move(_ id: UInt32, to space: UInt64) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard types()[space] == 0 else { return false }
+        if #available(macOS 14.5, *) {
+            guard let setCompat, let setWorkspace else { return false }
+            // WindowServer requires a temporary workspace ID on 14.5 and later.
+            // Serialize this transaction, including clearing the ID on errors.
+            let compat: Int32 = 0x79616265
+            guard setCompat(connection, space, compat) == 0 else { return false }
+            defer { _ = setCompat(connection, space, 0) }
+            var number = id
+            return setWorkspace(connection, &number, 1, compat) == 0
+        }
+        guard let moveManaged else { return false }
+        moveManaged(connection, [NSNumber(value: id)] as CFArray, space)
+        return true
+    }
+}
+
+func leaveFullscreen(_ element: AXUIElement, number: UInt32, deadline: Date) -> Bool {
+    SpaceBridge.shared.transitionLock.lock(); defer { SpaceBridge.shared.transitionLock.unlock() }
+    guard Date() < deadline else { return false }
+    AXUIElementSetAttributeValue(element, "AXFullScreen" as CFString, kCFBooleanFalse)
+    let end = min(deadline, Date().addingTimeInterval(4))
+    while Date() < end {
+        let types = SpaceBridge.shared.types()
+        if (axValue(element, "AXFullScreen") as? NSNumber)?.boolValue == false,
+           let spaces = SpaceBridge.shared.spaces(number), !spaces.isEmpty,
+           spaces.allSatisfy({ types[$0] == 0 }) { return true }
+        Thread.sleep(forTimeInterval: 0.03)
+    }
+    return false
+}
+
 struct WindowRef: Decodable {
     let id: String
     let pid: Int32
@@ -21,6 +113,8 @@ struct WindowRef: Decodable {
     let title_source: String?
     let bounds: WindowFrame?
     let minimized: Bool?
+    let space_ids: [UInt64]?
+    let fullscreen: Bool?
 }
 struct WindowFrame: Codable, Equatable, Sendable {
     let x, y, width, height: Double
@@ -29,6 +123,8 @@ struct WindowAction: Decodable {
     let kind: String
     let window: WindowRef
     let target: WindowFrame?
+    let target_space: UInt64?
+    let target_fullscreen: Bool?
 }
 
 func axValue(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {
@@ -64,7 +160,7 @@ func currentFocus() -> [String: Any] {
 enum WindowIndex {
     case complete([CGWindowID: AXUIElement]), partial([CGWindowID: AXUIElement]), unavailable(String), gone
 }
-func readWindowIndex(_ w: WindowRef) -> WindowIndex {
+func readWindowIndex(_ w: WindowRef, extraIDs: Set<CGWindowID> = []) -> WindowIndex {
     guard processMatches(w) else { return .gone }
     let app = AXUIElementCreateApplication(w.pid)
     var rawWindows: CFArray?
@@ -73,7 +169,7 @@ func readWindowIndex(_ w: WindowRef) -> WindowIndex {
         AXUIElementSetMessagingTimeout(app, timeout)
         var count: CFIndex = 0
         status = AXUIElementGetAttributeValueCount(app, kAXWindowsAttribute as CFString, &count)
-        if status == .success, count == 0 { return .complete([:]) }
+        if status == .success, count == 0 { rawWindows = [] as CFArray; break }
         if status == .success { status = AXUIElementCopyAttributeValues(app, kAXWindowsAttribute as CFString, 0, count, &rawWindows) }
         if status != .cannotComplete { break }
     }
@@ -84,6 +180,48 @@ func readWindowIndex(_ w: WindowRef) -> WindowIndex {
         if _AXUIElementGetWindow(element, &number) == .success {
             if index[number] == nil { index[number] = element }
         } else { complete = false }
+    }
+    if !extraIDs.isSubset(of: Set(index.keys)) {
+        // Apps often expose their main/focused window across Spaces even when
+        // AXWindows omits it. Resolve these public attributes before searching.
+        for attribute in [kAXMainWindowAttribute, kAXFocusedWindowAttribute] {
+            var raw: CFTypeRef?
+            AXUIElementSetMessagingTimeout(app, 0.06)
+            if AXUIElementCopyAttributeValue(app, attribute as CFString, &raw) == .success,
+               let raw, CFGetTypeID(raw) == AXUIElementGetTypeID() {
+                let element = raw as! AXUIElement
+                var number: CGWindowID = 0
+                if _AXUIElementGetWindow(element, &number) == .success, extraIDs.contains(number) { index[number] = element }
+            }
+        }
+    }
+    if !extraIDs.isSubset(of: Set(index.keys)) {
+        // AXWindows omits other Spaces. Resolve a bounded set of Cocoa remote
+        // element IDs, and accept only exact WindowServer IDs from this process.
+        // Never claim a missing off-Space window is closed after a partial read.
+        let handle = dlopen("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices", RTLD_LAZY)
+        if let handle, let symbol = dlsym(handle, "_AXUIElementCreateWithRemoteToken") {
+            let create = unsafeBitCast(symbol, to: (@convention(c) (CFData) -> Unmanaged<AXUIElement>?).self)
+            var token = Data(count: 20), pid = w.pid, magic: UInt32 = 0x636f636f
+            withUnsafeBytes(of: &pid) { token.replaceSubrange(0..<4, with: $0) }
+            withUnsafeBytes(of: &magic) { token.replaceSubrange(8..<12, with: $0) }
+            let deadline = Date().addingTimeInterval(0.18)
+            var missing = extraIDs.subtracting(index.keys)
+            for value in UInt64(0)..<1000 {
+                if Date() >= deadline || missing.isEmpty { break }
+                var value = value
+                withUnsafeBytes(of: &value) { token.replaceSubrange(12..<20, with: $0) }
+                guard let element = create(token as CFData)?.takeRetainedValue() else { continue }
+                AXUIElementSetMessagingTimeout(element, 0.015)
+                var role: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &role) == .success,
+                      let role = role as? String, [kAXStandardWindowSubrole, kAXDialogSubrole].contains(role) else { continue }
+                var number: CGWindowID = 0
+                if _AXUIElementGetWindow(element, &number) == .success, missing.contains(number) { index[number] = element; missing.remove(number) }
+            }
+            dlclose(handle)
+        }
+        complete = complete && extraIDs.isSubset(of: Set(index.keys))
     }
     return complete ? .complete(index) : .partial(index)
 }
@@ -119,6 +257,9 @@ final class BatchResults: @unchecked Sendable {
     private let lock = NSLock()
     private var values: [Int: [String: Any]] = [:]
     private var indexLoads = 0
+    private var elements: [Int: AXUIElement] = [:]
+    func retain(_ index: Int, _ element: AXUIElement) { lock.lock(); elements[index] = element; lock.unlock() }
+    func element(_ index: Int) -> AXUIElement? { lock.lock(); defer { lock.unlock() }; return elements[index] }
     func noteIndexLoad() { lock.lock(); indexLoads += 1; lock.unlock() }
     func indexLoadCount() -> Int { lock.lock(); defer { lock.unlock() }; return indexLoads }
     func set(_ index: Int, _ value: [String: Any]) { lock.lock(); values[index] = value; lock.unlock() }
@@ -128,6 +269,7 @@ final class BatchResults: @unchecked Sendable {
 struct DisplayCheck: Decodable, Equatable {
     let id: String
     let bounds, usable: WindowFrame
+    let gather_space: UInt64?
 }
 struct BatchRequest: Decodable {
     let actions: [WindowAction]
@@ -176,15 +318,31 @@ func batchWindows(_ request: BatchRequest) {
         output(["ok": false, "error": "Accessibility access is required; batches require unique IDs and support up to 512 windows."]); return
     }
     if let expected = request.expected_displays {
-        let actual = try! JSONDecoder().decode([DisplayCheck].self, from: JSONSerialization.data(withJSONObject: displays()))
+        let destinations = SpaceBridge.shared.destinations()
+        let tracked = expected.contains { $0.gather_space != nil }
+        let screens = displays().map { screen -> [String: Any] in
+            var screen = screen
+            if tracked, let id = screen["id"] as? String { screen["gather_space"] = destinations[id.uppercased()] ?? destinations["MAIN"] }
+            return screen
+        }
+        let actual = try! JSONDecoder().decode([DisplayCheck].self, from: JSONSerialization.data(withJSONObject: screens))
         if Dictionary(uniqueKeysWithValues: actual.map { ($0.id, $0) }) != Dictionary(uniqueKeysWithValues: expected.map { ($0.id, $0) }) {
             output(["ok": false, "error": "Display arrangement changed. Make a fresh preview."]); return
         }
+    }
+    let bridge = SpaceBridge.shared
+    let transitionDeadline = Date().addingTimeInterval(12)
+    // A destination must still be the reviewed regular Space, before any effects.
+    let destinations = bridge.types()
+    if actions.contains(where: { $0.target_space.map { destinations[$0] != 0 } ?? false }) {
+        output(["ok": false, "error": "The destination Space changed. Make a fresh preview."]); return
     }
     let focusBefore = currentFocus()
     let beforeEntries = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []
     let before = cgRecords(beforeEntries)
     let results = BatchResults()
+    let trackedIDs = Dictionary(grouping: actions.filter { $0.window.space_ids != nil }, by: { $0.window.pid })
+        .mapValues { Set($0.compactMap { UInt32($0.window.id.dropFirst(2)) }) }
     let groups = Array(Dictionary(grouping: Array(actions.enumerated()), by: { $0.element.window.pid }).values)
     let voiceOver = NSWorkspace.shared.isVoiceOverEnabled
     let prepared = Date()
@@ -208,13 +366,16 @@ func batchWindows(_ request: BatchRequest) {
             let initial = before[w.id]
             // Already-correct windows need neither an AX lookup nor a resize.
             if action.kind == "move", let target = action.target, let current = initial,
-               current.pid == w.pid, current.onscreen, occupiesPane(current.frame, target) {
+               current.pid == w.pid, current.onscreen, occupiesPane(current.frame, target),
+               w.fullscreen != true, action.target_fullscreen != true,
+               w.space_ids.map({ bridge.spaces(UInt32(w.id.dropFirst(2)) ?? 0) == $0 }) ?? true,
+               action.target_space.map({ bridge.spaces(UInt32(w.id.dropFirst(2)) ?? 0) == [$0] }) ?? true {
                 results.set(index, ["id": w.id, "ok": true, "unchanged": true, "bounds": frameDictionary(current.frame), "minimized": false]); continue
             }
-            if action.kind == "inspect", let current = initial, current.pid == w.pid, current.onscreen {
+            if action.kind == "inspect", w.space_ids == nil, let current = initial, current.pid == w.pid, current.onscreen {
                 results.set(index, ["id": w.id, "ok": true, "bounds": frameDictionary(current.frame), "minimized": false]); continue
             }
-            if windowIndex == nil { results.noteIndexLoad(); windowIndex = readWindowIndex(w) }
+            if windowIndex == nil { results.noteIndexLoad(); windowIndex = readWindowIndex(w, extraIDs: trackedIDs[w.pid] ?? []) }
             let lookup = indexedWindow(w, in: windowIndex!)
             guard case let .found(element) = lookup else {
                 if case .absent = lookup, ["inspect", "metadata"].contains(action.kind) {
@@ -224,10 +385,15 @@ func batchWindows(_ request: BatchRequest) {
                 switch lookup { case .unavailable(let detail): message = detail; default: message = "Window is no longer open." }
                 results.set(index, ["id": w.id, "ok": false, "skipped": true, "error": message]); continue
             }
+            results.retain(index, element)
             if ["inspect", "metadata"].contains(action.kind) {
                 var result: [String: Any] = ["id": w.id, "ok": true]
                 result["bounds"] = initial.map { frameDictionary($0.frame) } ?? windowFrame(element)
                 result["minimized"] = (axValue(element, kAXMinimizedAttribute) as? NSNumber)?.boolValue ?? false
+                if w.space_ids != nil {
+                    result["space_ids"] = bridge.spaces(UInt32(w.id.dropFirst(2)) ?? 0)
+                    result["fullscreen"] = (axValue(element, "AXFullScreen") as? NSNumber)?.boolValue
+                }
                 if action.kind == "metadata" { result["title"] = axValue(element, kAXTitleAttribute) as? String }
                 results.set(index, result); continue
             }
@@ -237,6 +403,7 @@ func batchWindows(_ request: BatchRequest) {
             let freshEntries = CGWindowListCopyWindowInfo(.optionIncludingWindow, number) as? [[String: Any]] ?? []
             let current = freshEntries.first(where: { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == number }).flatMap(cgRecord)
             var unchanged = false
+            var changed = "bounds"
             if let expected = w.bounds {
                 if action.kind == "restore", w.minimized == true {
                     // Minimized windows may disappear from WindowServer's list.
@@ -246,11 +413,22 @@ func batchWindows(_ request: BatchRequest) {
                         unchanged = sameFrame(WindowFrame(x: b["x"]!, y: b["y"]!, width: b["width"]!, height: b["height"]!), expected)
                     }
                 } else if let current = current {
-                    unchanged = current.pid == w.pid && current.onscreen && sameFrame(current.frame, expected)
+                    if w.space_ids != nil && !current.onscreen, let frame = windowFrame(element) {
+                        // CG's list can contain presentation coordinates while
+                        // another Space slides. AX keeps the real window frame.
+                        unchanged = current.pid == w.pid && sameFrame(WindowFrame(x: frame["x"]!, y: frame["y"]!, width: frame["width"]!, height: frame["height"]!), expected)
+                    } else {
+                        unchanged = current.pid == w.pid && current.onscreen && sameFrame(current.frame, expected)
+                    }
                 }
             }
+            if let expectedSpaces = w.space_ids {
+                if bridge.spaces(number) != expectedSpaces { unchanged = false; changed = "Space membership" }
+                if (axValue(element, kAXMinimizedAttribute) as? NSNumber)?.boolValue != (w.minimized ?? false) { unchanged = false; changed = "minimized state" }
+                if (axValue(element, "AXFullScreen") as? NSNumber)?.boolValue != (w.fullscreen ?? false) { unchanged = false; changed = "fullscreen state" }
+            }
             guard unchanged else {
-                results.set(index, ["id": w.id, "ok": false, "skipped": true, "error": "Window changed since preview."]); continue
+                results.set(index, ["id": w.id, "ok": false, "skipped": true, "error": "Window \(changed) changed since preview.", "observed_bounds": current.map { frameDictionary($0.frame) } ?? [:]]); continue
             }
             if ["minimize", "close"].contains(action.kind) {
                 let app = focusedApplication()
@@ -259,13 +437,30 @@ func batchWindows(_ request: BatchRequest) {
                     results.set(index, ["id": w.id, "ok": false, "skipped": true, "error": "Kept the current app's focused window."]); continue
                 }
             }
-            if (axValue(element, "AXFullScreen") as? NSNumber)?.boolValue == true || (axValue(element, kAXModalAttribute) as? NSNumber)?.boolValue == true {
-                results.set(index, ["id": w.id, "ok": false, "skipped": true, "error": "Kept a fullscreen window or dialog."]); continue
+            let fullscreen = (axValue(element, "AXFullScreen") as? NSNumber)?.boolValue == true
+            if (axValue(element, kAXModalAttribute) as? NSNumber)?.boolValue == true || (fullscreen && w.space_ids == nil) {
+                results.set(index, ["id": w.id, "ok": false, "skipped": true, "error": "Kept a fullscreen window or dialog. Use All Spaces to gather fullscreen windows."]); continue
             }
             var result: [String: Any] = ["id": w.id, "ok": true, "delivered": true]
             if ["move", "restore"].contains(action.kind), let target = action.target,
                [target.x, target.y, target.width, target.height].allSatisfy({ $0.isFinite }), target.width > 0, target.height > 0 {
+                if Date() >= transitionDeadline {
+                    results.set(index, ["id": w.id, "ok": false, "skipped": true, "error": "Space transition budget reached. Make a fresh preview."]); continue
+                }
                 if action.kind == "restore" { AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanFalse) }
+                if fullscreen && !leaveFullscreen(element, number: number, deadline: transitionDeadline) {
+                    result["ok"] = false; result["error"] = "Fullscreen exit could not be verified; inspect before retrying."
+                    results.set(index, result); continue
+                }
+                if let space = action.target_space, bridge.spaces(number) != [space] {
+                    _ = bridge.move(number, to: space)
+                    let deadline = min(transitionDeadline, Date().addingTimeInterval(1))
+                    while bridge.spaces(number) != [space] && Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
+                    guard bridge.spaces(number) == [space] else {
+                        result["ok"] = false; result["error"] = "Space transfer could not be verified; inspect before retrying."
+                        results.set(index, result); continue
+                    }
+                }
                 var resizable: DarwinBoolean = true
                 if AXUIElementIsAttributeSettable(element, kAXSizeAttribute as CFString, &resizable) == .success { result["resizable"] = resizable.boolValue }
                 if resizable.boolValue { placeWindow(element, target) }
@@ -273,7 +468,27 @@ func batchWindows(_ request: BatchRequest) {
                     var p = CGPoint(x: target.x, y: target.y)
                     AXUIElementSetAttributeValue(element, kAXPositionAttribute as CFString, AXValueCreate(.cgPoint, &p)!)
                 }
+                if action.target_fullscreen == true {
+                    bridge.transitionLock.lock(); defer { bridge.transitionLock.unlock() }
+                    guard Date() < transitionDeadline else {
+                        result["ok"] = false; result["error"] = "Fullscreen restore timed out; inspect before retrying."
+                        results.set(index, result); continue
+                    }
+                    AXUIElementSetAttributeValue(element, "AXFullScreen" as CFString, kCFBooleanTrue)
+                    let deadline = min(transitionDeadline, Date().addingTimeInterval(4))
+                    while Date() < deadline {
+                        if (axValue(element, "AXFullScreen") as? NSNumber)?.boolValue == true,
+                           bridge.spaces(number)?.contains(where: { bridge.types()[$0] == 4 }) == true,
+                           let frame = windowFrame(element),
+                           sameFrame(WindowFrame(x: frame["x"]!, y: frame["y"]!, width: frame["width"]!, height: frame["height"]!), target) { break }
+                        Thread.sleep(forTimeInterval: 0.03)
+                    }
+                }
             } else if action.kind == "minimize" {
+                if fullscreen && !leaveFullscreen(element, number: number, deadline: transitionDeadline) {
+                    result["ok"] = false; result["error"] = "Fullscreen exit could not be verified; inspect before retrying."
+                    results.set(index, result); continue
+                }
                 AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
             } else if action.kind == "close" {
                 guard let close = axValue(element, kAXCloseButtonAttribute), CFGetTypeID(close) == AXUIElementGetTypeID() else {
@@ -308,21 +523,31 @@ func batchWindows(_ request: BatchRequest) {
     let restoring = actions.enumerated().filter {
         $0.element.kind == "restore" && $0.element.window.minimized == true && ordered[$0.offset]["delivered"] as? Bool == true
     }.map { $0.element }
+    let closing = actions.enumerated().filter {
+        $0.element.kind == "close" && ordered[$0.offset]["delivered"] as? Bool == true
+    }.map { $0.element.window.id }
     let animationDeadline = Date().addingTimeInterval(0.9)
     // WindowServer reports the animated Dock thumbnail as the window frame.
-    // Observe restoration until its real rectangle returns; never resend the write.
-    while !restoring.isEmpty && Date() < animationDeadline && restoring.contains(where: { action in
+    // Observe restoration and Close animations; never resend either write.
+    while Date() < animationDeadline && (closing.contains(where: { id in
+        guard let current = after[id] else { return false }
+        return current.onscreen || (bridge.available && bridge.spaces(UInt32(id.dropFirst(2)) ?? 0) != [])
+    }) || restoring.contains(where: { action in
         guard let current = after[action.window.id], let target = action.target else { return true }
         return !current.onscreen || !occupiesPane(current.frame, target)
-    }) {
+    })) {
         Thread.sleep(forTimeInterval: 0.02)
         afterEntries = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []
         after = cgRecords(afterEntries)
     }
     var verificationIndices: [Int32: WindowIndex] = [:]
+    let spaceTypes = bridge.types(), activeSpaces = bridge.currentSpaces()
+    let closedIDs = Set(actions.filter { $0.kind == "close" }.compactMap { UInt32($0.window.id.dropFirst(2)) })
     for (index, action) in actions.enumerated() {
         if ordered[index]["skipped"] as? Bool == true || ["inspect", "metadata"].contains(action.kind) { continue }
-        if let current = after[action.window.id], current.pid == action.window.pid {
+        let number = UInt32(action.window.id.dropFirst(2)) ?? 0
+        let current = after[action.window.id]
+        if let current, current.pid == action.window.pid {
             if ordered[index]["unchanged"] as? Bool == true, let previous = before[action.window.id], !sameFrame(current.frame, previous.frame) {
                 ordered[index]["ok"] = false; ordered[index]["skipped"] = true
                 ordered[index]["error"] = "Window changed while arranging; preserved the new placement."
@@ -330,21 +555,52 @@ func batchWindows(_ request: BatchRequest) {
             ordered[index]["bounds"] = frameDictionary(current.frame)
             ordered[index]["minimized"] = !current.onscreen
         }
-        if action.kind == "minimize" || action.kind == "close" {
+        if action.kind == "close" {
             if verificationIndices[action.window.pid] == nil {
-                results.noteIndexLoad(); verificationIndices[action.window.pid] = readWindowIndex(action.window)
+                results.noteIndexLoad()
+                // Closed NSWindows may retain their Space entries. Discover
+                // other tracked windows, then use the scoped removal check
+                // below with the complete AX roster to distinguish minimization.
+                let liveIDs = (trackedIDs[action.window.pid] ?? []).subtracting(closedIDs).filter { bridge.spaces($0) != [] }
+                verificationIndices[action.window.pid] = readWindowIndex(action.window, extraIDs: Set(liveIDs))
             }
             let lookup = indexedWindow(action.window, in: verificationIndices[action.window.pid]!)
-            if case let .found(element) = lookup {
-                ordered[index]["minimized"] = (axValue(element, kAXMinimizedAttribute) as? NSNumber)?.boolValue ?? false
-                if action.kind == "close" { ordered[index]["ok"] = false; ordered[index]["error"] = "Window stayed open; its contents were preserved." }
-                if ordered[index]["bounds"] == nil { ordered[index]["bounds"] = before[action.window.id].map { frameDictionary($0.frame) } }
-            } else if case .absent = lookup {
-                ordered[index]["closed"] = true
-                ordered[index]["ok"] = action.kind == "close"
+            let membership = bridge.spaces(number)
+            let sameDesktop = before[action.window.id]?.onscreen == true
+                && action.window.space_ids.map { !activeSpaces.isDisjoint(with: $0) && membership == $0 } == true
+            // A retained closed NSWindow may keep its CG ID and Space. A
+            // complete current-Desktop AX roster still distinguishes Close
+            // from minimization, hiding the app, or moving to another Space.
+            let scopedRemoved = !processMatches(action.window) || ((membership == [] || sameDesktop) && current?.onscreen != true
+                && NSRunningApplication(processIdentifier: action.window.pid)?.isHidden == false)
+            if action.window.space_ids != nil { ordered[index]["space_ids"] = membership }
+            if case .absent = lookup, action.window.space_ids == nil || scopedRemoved {
+                ordered[index]["closed"] = true; ordered[index]["ok"] = true
             } else {
-                ordered[index]["ok"] = false; ordered[index]["error"] = "Window could not be verified."
+                ordered[index]["ok"] = false
+                ordered[index]["error"] = "Close could not be verified; inspect before retrying."
             }
+            continue
+        }
+        if action.window.space_ids != nil || action.target_space != nil || action.target_fullscreen != nil {
+            let spaces = bridge.spaces(number)
+            ordered[index]["space_ids"] = spaces
+            if let current, current.onscreen, spaces?.allSatisfy({ spaceTypes[$0] == 0 }) == true, action.kind == "move" {
+                ordered[index]["fullscreen"] = false; ordered[index]["minimized"] = false
+            } else if let element = results.element(index) {
+                ordered[index]["fullscreen"] = (axValue(element, "AXFullScreen") as? NSNumber)?.boolValue
+                ordered[index]["minimized"] = (axValue(element, kAXMinimizedAttribute) as? NSNumber)?.boolValue
+                ordered[index]["bounds"] = windowFrame(element) ?? ordered[index]["bounds"]
+            } else {
+                ordered[index]["minimized"] = nil
+            }
+            if let target = action.target_space, action.target_fullscreen != true, spaces != [target] {
+                ordered[index]["ok"] = false; ordered[index]["error"] = "Window did not reach the reviewed Space."
+            }
+        }
+        if action.kind == "minimize", let element = results.element(index) {
+            ordered[index]["minimized"] = (axValue(element, kAXMinimizedAttribute) as? NSNumber)?.boolValue
+            if ordered[index]["bounds"] == nil { ordered[index]["bounds"] = before[action.window.id].map { frameDictionary($0.frame) } }
         }
     }
     let focusAfter = currentFocus()
@@ -353,10 +609,14 @@ func batchWindows(_ request: BatchRequest) {
     // During a Dock animation CG still calls the thumbnail an onscreen window.
     // Confirmed AX minimizations must not become obstacles in the next partition.
     let removedIDs = Set(ordered.filter { $0["minimized"] as? Bool == true || $0["closed"] as? Bool == true }.compactMap { $0["id"] as? String })
+    let destinationSpaces = Set(actions.compactMap { $0.target_space })
+    let gathering = !destinationSpaces.isEmpty
     let observed = inventoryData(entries: afterEntries.filter {
         let id = ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value ?? 0
-        return ($0[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue == true && !removedIDs.contains("w-\(id)")
-    }, focus: focusAfter)
+        let included = gathering ? bridge.spaces(id).map { !destinationSpaces.isDisjoint(with: $0) } ?? false
+            : ($0[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue == true
+        return included && !removedIDs.contains("w-\(id)")
+    }, focus: focusAfter, allSpaces: gathering)
     output(["ok": true, "data": ["results": ordered, "focus_check": focus, "inventory": observed,
         "timings": ["prepare_ms": prepared.timeIntervalSince(started) * 1000,
                     "effects_ms": effectsFinished.timeIntervalSince(prepared) * 1000,
@@ -399,7 +659,19 @@ func displays() -> [[String: Any]] {
     }
 }
 
-func inventoryData(entries: [[String: Any]], focus: [String: Any]) -> [String: Any] {
+func inventoryData(entries: [[String: Any]], focus: [String: Any], allSpaces: Bool = false) -> [String: Any] {
+    let bridge = SpaceBridge.shared, types = allSpaces ? SpaceBridge.shared.types() : [:]
+    var indices: [Int32: WindowIndex] = [:]
+    var memberships: [UInt32: [UInt64]] = [:]
+    if allSpaces {
+        for entry in entries where (entry[kCGWindowLayer as String] as? NSNumber)?.intValue == 0 {
+            if let id = (entry[kCGWindowNumber as String] as? NSNumber)?.uint32Value { memberships[id] = bridge.spaces(id) }
+        }
+    }
+    let byOwner = allSpaces ? Dictionary(grouping: entries.filter {
+        let id = ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value ?? 0
+        return ($0[kCGWindowLayer as String] as? NSNumber)?.intValue == 0 && memberships[id]?.isEmpty == false
+    }, by: { ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value ?? 0 }) : [:]
     let apps = Dictionary(uniqueKeysWithValues: NSWorkspace.shared.runningApplications.map { ($0.processIdentifier, $0) })
     let frontmost = focus["pid"] as? Int32
     let focusedID = focus["window_id"] as? String ?? ""
@@ -418,29 +690,68 @@ func inventoryData(entries: [[String: Any]], focus: [String: Any]) -> [String: A
         let focused = focusedID.isEmpty ? frontmost == pid && !focusedFound : focusedID == "w-\(id)"
         if focused { focusedFound = true }
         let title = entry[kCGWindowName as String] as? String ?? name
-        windows.append(["id": "w-\(id)", "app_name": name, "title": title, "pid": pid,
+        var row: [String: Any] = ["id": "w-\(id)", "app_name": name, "title": title, "pid": pid,
             "title_source": entry[kCGWindowName as String] is String ? "cg" : "app",
             "process_instance": "macos-proc-v1:\(process.pbi_start_tvsec):\(process.pbi_start_tvusec)",
             "bounds": ["x": frame.minX, "y": frame.minY, "width": frame.width, "height": frame.height],
-            "minimized": false, "hidden": false, "visible": true, "is_focused": focused])
+            "minimized": false, "hidden": false, "visible": true, "is_focused": focused]
+        if allSpaces {
+            guard let membership = memberships[id] else {
+                errors.append(["app": name, "error": "Space membership unavailable."]); continue
+            }
+            if membership.isEmpty { continue }
+            if membership.count > 1 {
+                errors.append(["app": name, "error": "Kept a window pinned to multiple Spaces."]); continue
+            }
+            row["space_ids"] = membership
+            row["fullscreen"] = membership.contains { types[$0] == 4 }
+            row["onscreen"] = (entry[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue ?? false
+            if app.isHidden { continue }
+            if row["onscreen"] as? Bool != true {
+                let reference = try! JSONDecoder().decode(WindowRef.self, from: JSONSerialization.data(withJSONObject: row))
+                if indices[pid] == nil { indices[pid] = readWindowIndex(reference, extraIDs: Set((byOwner[pid] ?? []).compactMap { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value })) }
+                guard case let .found(element) = indexedWindow(reference, in: indices[pid]!),
+                      let minimized = axValue(element, kAXMinimizedAttribute) as? NSNumber else {
+                    errors.append(["app": name, "error": "Off-Space window could not be inspected within the discovery budget."]); continue
+                }
+                if minimized.boolValue { continue }
+                guard let actualFrame = windowFrame(element) else {
+                    errors.append(["app": name, "error": "Off-Space window geometry unavailable."]); continue
+                }
+                row["bounds"] = actualFrame
+                row["fullscreen"] = (axValue(element, "AXFullScreen") as? NSNumber)?.boolValue ?? row["fullscreen"]
+            }
+        }
+        windows.append(row)
         checked.insert(name)
     }
-    return ["displays": displays(), "windows": windows,
-        "coverage": ["scope": "onscreen regular app windows at least 220 by 180 points", "checked_apps": checked.sorted(), "errors": errors, "complete": errors.isEmpty]]
+    let destinations = allSpaces ? bridge.destinations() : [:]
+    let screens = displays().map { screen -> [String: Any] in
+        var value = screen
+        if let id = screen["id"] as? String, let space = (destinations[id.uppercased()] ?? destinations["MAIN"]) { value["gather_space"] = space }
+        return value
+    }
+    return ["displays": screens, "windows": windows, "all_spaces": allSpaces,
+        "coverage": ["scope": allSpaces ? "regular app windows across all Spaces at least 220 by 180 points, excluding hidden and minimized windows" : "onscreen regular app windows at least 220 by 180 points", "checked_apps": checked.sorted(), "errors": errors, "complete": errors.isEmpty]]
 }
 
-func inventory() {
+func inventory(allSpaces: Bool = false) {
     guard AXIsProcessTrusted() else { output(["ok": false, "error": "Allow Fenlet in System Settings → Privacy & Security → Accessibility."]); return }
-    guard let entries = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
+    if allSpaces && !SpaceBridge.shared.available {
+        output(["ok": false, "error": "All Spaces is unavailable on this macOS version. Use Current Space."]); return
+    }
+    guard let entries = CGWindowListCopyWindowInfo(allSpaces ? [.optionAll, .excludeDesktopElements] : [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
         output(["ok": false, "error": "The current screen inventory is unavailable."]); return
     }
-    output(["ok": true, "data": inventoryData(entries: entries, focus: currentFocus())])
+    output(["ok": true, "data": inventoryData(entries: entries, focus: currentFocus(), allSpaces: allSpaces)])
 }
 
 func nativeCommand(_ command: String, payload: Data? = nil) -> Bool {
     switch command {
     case "displays": output(displays())
-    case "inventory": inventory()
+    case "inventory":
+        let options = payload.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        inventory(allSpaces: options?["all_spaces"] as? Bool ?? false)
     case "permissions": output(["ok": true, "data": ["accessibility": AXIsProcessTrusted()]])
     case "focus": output(["ok": true, "data": currentFocus()])
     case "windows":

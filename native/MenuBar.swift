@@ -10,6 +10,7 @@ struct ScreenInfo: Decodable, Identifiable, Equatable {
     let built_in: Bool
     let bounds, usable: Bounds
     let physical_size_mm: PhysicalSize?
+    var gather_space: UInt64? = nil
     var diagonal: String? {
         guard let mm = physical_size_mm else { return nil }
         return String(format: "%.0f″", hypot(mm.width, mm.height) / 25.4)
@@ -22,6 +23,8 @@ struct WindowInfo: Decodable, Identifiable {
     let bounds: Bounds
     let minimized: Bool
     let is_focused: Bool?
+    var space_ids: [UInt64]? = nil
+    var fullscreen: Bool? = nil
 }
 struct ActionInfo: Decodable, Identifiable {
     let kind: String
@@ -40,6 +43,7 @@ struct ActionInfo: Decodable, Identifiable {
 struct InventoryInfo: Decodable {
     let displays: [ScreenInfo]
     let windows: [WindowInfo]
+    var all_spaces: Bool? = nil
 }
 struct PlanInfo: Decodable { let inventory: InventoryInfo; let actions: [ActionInfo] }
 struct DoctorInfo: Decodable { let accessibility, key_configured, runtime_ready: Bool }
@@ -82,6 +86,8 @@ struct Settings: Codable {
     var chatScreen: String?
     var referenceScreen: String?
     var customInstructions: String?
+    var allSpaces: Bool?
+    var gatherScreen: String?
 }
 
 enum TidyError: LocalizedError {
@@ -132,7 +138,7 @@ enum TidyError: LocalizedError {
                 if !self.busy && !self.editingDraft && self.draggedWindowID == nil && !self.onboarding && !self.showingSettings {
                     let revision = self.desktopRevision
                     do {
-                        let data = try await Self.command(["scan"], settings: self.settings, frontmostPid: self.frontmostPid)
+                        let data = try await Self.command(self.scanArguments, settings: self.settings, frontmostPid: self.frontmostPid)
                         let response = try JSONDecoder().decode(Envelope<InventoryInfo>.self, from: data)
                         if !Task.isCancelled, !self.busy, !self.editingDraft, revision == self.desktopRevision, response.ok, let inventory = response.data {
                             self.liveReadOK = true
@@ -160,7 +166,7 @@ enum TidyError: LocalizedError {
         let actual = Dictionary(uniqueKeysWithValues: live.windows.map { ($0.id, $0) })
         return planned.windows.allSatisfy { w in
             guard let current = actual[w.id] else { return false }
-            return w.pid == current.pid && w.process_instance == current.process_instance && w.bounds == current.bounds && w.minimized == current.minimized
+            return w.pid == current.pid && w.process_instance == current.process_instance && w.bounds == current.bounds && w.minimized == current.minimized && w.space_ids == current.space_ids && w.fullscreen == current.fullscreen
         }
     }
     var layoutRequest: String {
@@ -174,7 +180,7 @@ enum TidyError: LocalizedError {
         guard let screens = inventory?.displays, !screens.isEmpty else { return 550 }
         let gallery: CGFloat = screens.count == 1 || screens.count > 2 ? 255
             : screens.contains(where: { $0.bounds.height > $0.bounds.width }) ? 231 : 193
-        return 296 + gallery + (draft ? 104 : 0)
+        return 330 + gallery + (draft ? 104 : 0)
     }
     var panelHeight: CGFloat { Self.panelHeight(for: liveInventory, draft: hasLayout) }
     func claimDraftIntroduction(_ id: String) -> Bool { introducedWindows.insert(id).inserted }
@@ -212,6 +218,17 @@ enum TidyError: LocalizedError {
             if actions.first(where: { $0.id == id })?.display != display { editDraft(["--move", id, display]) }
         case .disposition(let kind): editDraft(["--" + kind, id])
         }
+    }
+    var scopeArguments: [String] { settings.allSpaces == true ? ["--all-spaces"] : [] }
+    var scanArguments: [String] { ["scan"] + scopeArguments }
+    var allSpaces: Binding<Bool> {
+        Binding(get: { self.settings.allSpaces == true }, set: { value in
+            guard self.settings.allSpaces != value else { return }
+            self.settings.allSpaces = value
+            self.cancelPreview()
+            do { try self.persist() } catch { self.error = error.localizedDescription }
+            self.scan(layout: false)
+        })
     }
     func destination(_ key: WritableKeyPath<Settings, String?>) -> Binding<String> {
         Binding(get: {
@@ -296,7 +313,7 @@ enum TidyError: LocalizedError {
         Task {
             defer { busy = false }
             do {
-                let data = try await Self.command(layout ? layoutArguments("plan") : ["scan"], settings: settings, frontmostPid: frontmostPid)
+                let data = try await Self.command(layout ? layoutArguments("plan") : scanArguments, settings: settings, frontmostPid: frontmostPid)
                 guard revision == desktopRevision else { status = "Ready to arrange."; return }
                 let inventory: InventoryInfo
                 if layout {
@@ -311,13 +328,17 @@ enum TidyError: LocalizedError {
                 }
                 liveInventory = inventory; liveReadOK = true
                 if liveTask != nil { windowPreviews.refresh(inventory.windows) }
-                status = layout ? "Nothing moves or closes until you confirm." : "Ready to arrange."
+                status = layout ? (settings.allSpaces == true && inventory.windows.contains { $0.fullscreen == true }
+                    ? "Fullscreen windows will leave fullscreen when you confirm." : "Nothing moves or closes until you confirm.") : "Ready to arrange."
+                if layout, preview?.coverage.errors.isEmpty == false { status += " Some windows couldn't be inspected." }
             } catch { self.error = error.localizedDescription; status = "Try refreshing your preview." }
         }
     }
     func layoutArguments(_ command: String) -> [String] {
-        [command, layoutRequest, "--model", settings.model, "--provider", settings.provider,
-         "--work-display", settings.workScreen ?? "auto", "--chat-display", settings.chatScreen ?? "auto", "--reference-display", settings.referenceScreen ?? "auto"]
+        let gather = settings.allSpaces == true ? availableDisplays.first { $0.id == settings.gatherScreen } : nil
+        return [command, layoutRequest, "--model", settings.model, "--provider", settings.provider,
+         "--work-display", settings.workScreen ?? "auto", "--chat-display", settings.chatScreen ?? "auto", "--reference-display", settings.referenceScreen ?? "auto"] + scopeArguments
+            + (gather.map { ["--display", $0.id] } ?? [])
     }
     func complete(_ result: ApplyInfo, from before: PreviewInfo, elapsed: Int) {
         if result.undoable { remember(result.journal_path) }
@@ -328,6 +349,7 @@ enum TidyError: LocalizedError {
         }
         status = "\(result.arranged) arranged · \(result.minimized) minimized · \(result.closed) closed · \(String(format: "%.1fs", Double(elapsed) / 1000))"
         if result.arranged + result.minimized + result.closed == 0, result.failed == 0 { status = "Already arranged. · \(String(format: "%.1fs", Double(elapsed) / 1000))" }
+        if !before.coverage.errors.isEmpty { status += " Some windows couldn't be inspected." }
         if result.failed > 0 { error = "\(result.failed) windows couldn’t be changed. Refresh to review them." }
         if let check = result.layout_check, check.overlap_count > 0 { error = "\(check.overlap_count) overlapping pairs remain. Refresh to review." }
     }
@@ -426,10 +448,14 @@ struct WindowThumbnail: View {
             if let image = captures.image(for: window) {
                 Image(nsImage: image).resizable().aspectRatio(contentMode: .fit)
             } else {
-                VStack(spacing: 5) {
-                    AppGlyph(name: window.app_name)
-                    Text(window.app_name).font(.system(size: 10, weight: .medium)).lineLimit(1)
-                }.foregroundStyle(.secondary).padding(4)
+                GeometryReader { geometry in
+                    VStack(spacing: 5) {
+                        AppGlyph(name: window.app_name).scaleEffect(min(1, max(0.1, (geometry.size.height - 8) / 16)))
+                        if geometry.size.height >= 42 {
+                            Text(window.app_name).font(.system(size: 10, weight: .medium)).lineLimit(1)
+                        }
+                    }.foregroundStyle(.secondary).frame(width: geometry.size.width, height: geometry.size.height).clipped()
+                }
             }
         }.clipped()
     }
@@ -461,7 +487,9 @@ struct WindowTile: View {
                     }
                     Spacer(minLength: 0)
                     if editable { GrabDots() }
-                    else { Color.clear.frame(width: 8, height: 12).accessibilityHidden(true) }
+                    else if window.fullscreen == true {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right").font(.system(size: 8)).foregroundStyle(.secondary).accessibilityLabel("Fullscreen window")
+                    } else { Color.clear.frame(width: 8, height: 12).accessibilityHidden(true) }
                 }.padding(.horizontal, 5).frame(height: 20)
                     .background(.primary.opacity(colorScheme == .dark ? 0.04 : 0.03))
                 WindowThumbnail(window: window, captures: captures)
@@ -496,8 +524,30 @@ struct DisplayCard: View {
         let arranged = proposed ? actions.filter { $0.kind == "move" && $0.display == screen.id }.compactMap { a in
             a.target.map { PreviewPane(window: actual[a.id] ?? a.window, frame: $0) }
         } : []
+        if !proposed && sourceSpaceCount > 1 {
+            // Distinct Spaces have independent coordinates. Show an overview,
+            // rather than stacking several fullscreen previews on one rectangle.
+            let ordered = current.sorted { $0.id < $1.id }
+            let columns = min(3, Int(ceil(sqrt(Double(ordered.count)))))
+            let rows = (ordered.count + columns - 1) / columns
+            let area = screen.usable, gap = 12.0
+            let width = (area.width - gap * Double(columns + 1)) / Double(columns)
+            let height = (area.height - gap * Double(rows + 1)) / Double(rows)
+            return ordered.enumerated().map { index, pane in
+                PreviewPane(window: pane.window, frame: Bounds(x: area.x + gap + Double(index % columns) * (width + gap),
+                    y: area.y + gap + Double(index / columns) * (height + gap), width: width, height: height))
+            }
+        }
         // CG lists frontmost first; draw it last to preserve actual stacking.
         return Array(current.reversed()) + arranged
+    }
+    var sourceSpaceCount: Int {
+        let windows = inventory.windows.filter { w in
+            let b = w.bounds, s = screen.bounds
+            return !w.minimized && b.x + b.width / 2 >= s.x && b.x + b.width / 2 < s.x + s.width
+                && b.y + b.height / 2 >= s.y && b.y + b.height / 2 < s.y + s.height
+        }
+        return Set(windows.flatMap { $0.space_ids ?? [] }).count
     }
     func show(_ window: WindowInfo) {
         captures.prioritize([window], in: inventory.windows)
@@ -507,7 +557,7 @@ struct DisplayCard: View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 5) {
                 Image(systemName: screen.built_in ? "laptopcomputer" : "display").foregroundStyle(.secondary)
-                Text(screen.name).lineLimit(1).help(screen.name)
+                Text(!proposed && sourceSpaceCount > 1 ? "\(screen.name) · \(sourceSpaceCount) Spaces" : screen.name).lineLimit(1).help(screen.name)
                 Spacer(minLength: 2)
                 Text("\(panes.count)").foregroundStyle(.secondary).monospacedDigit()
             }.font(.system(size: 10, weight: .medium))
@@ -612,6 +662,20 @@ struct Panel: View {
             if store.onboarding || store.showingSettings {
                 ScrollView { SettingsPanel(store: store).padding(.vertical, 4) }
             } else {
+                HStack(spacing: 10) {
+                    Picker("Window scope", selection: store.allSpaces) {
+                        Text("Current Space").tag(false)
+                        Text("All Spaces").tag(true)
+                    }.pickerStyle(.segmented).labelsHidden().controlSize(.small).frame(width: 214).accessibilityLabel("Window scope")
+                    if store.settings.allSpaces == true {
+                        Picker("Gather destination", selection: store.destination(\.gatherScreen)) {
+                            Text("Use display roles").tag("auto")
+                            ForEach(store.availableDisplays) { screen in
+                                Text(screen.built_in ? "Laptop" : screen.name).tag(screen.id)
+                            }
+                        }.labelsHidden().controlSize(.small)
+                    } else { Spacer(minLength: 0) }
+                }.disabled(store.busy || store.editingDraft)
                 DisplayGallery(store: store, captures: store.windowPreviews)
                     .frame(maxHeight: .infinity)
                 if store.hasLayout {

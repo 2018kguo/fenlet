@@ -1,21 +1,30 @@
-// Disposable windows for real AX verification. Never activates or raises an app.
+// Disposable windows for AX verification. Only explicit fullscreen commands focus a fixture window.
 import AppKit
 import Darwin
 
+final class FixtureDelegate: NSObject, NSWindowDelegate {
+    var waiting = false
+    func respond() { if waiting { waiting = false; reply() } }
+    func windowDidEnterFullScreen(_ notification: Notification) { respond() }
+    func windowDidFailToEnterFullScreen(_ window: NSWindow) { respond() }
+}
+let delegate = FixtureDelegate()
 let app = NSApplication.shared
 app.setActivationPolicy(.regular)
 var windows: [NSWindow] = []
 let top = NSScreen.screens.first!.frame.maxY
-for index in 0..<3 {
+func makeWindow(_ index: Int) -> NSWindow {
     let window = NSWindow(contentRect: NSRect(x: 100 + index * 70, y: 150 + index * 40, width: 640, height: 480),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
     window.title = "Fenlet verification \(index)"
     window.isReleasedWhenClosed = false
+    window.delegate = delegate
     window.minSize = NSSize(width: index == 2 ? 700 : 300, height: 240)
     window.isDocumentEdited = index == 2
     window.orderBack(nil)
-    windows.append(window)
+    return window
 }
+for index in 0..<3 { windows.append(makeWindow(index)) }
 func reply() {
     var info = proc_bsdinfo()
     let pid = getpid()
@@ -36,6 +45,15 @@ DispatchQueue.global().async {
     while let line = readLine() {
         DispatchQueue.main.async {
             if line == "quit" { app.terminate(nil) }
+            if line == "fullscreen" {
+                windows[0].makeKeyAndOrderFront(nil)
+                app.activate(ignoringOtherApps: true)
+                windows[0].collectionBehavior.insert(.fullScreenPrimary)
+                delegate.waiting = true
+                windows[0].toggleFullScreen(nil)
+                return
+            }
+            if line == "renew" { windows[0] = makeWindow(0) }
             if line == "rename" { windows[0].title = "Fenlet verification renamed" }
             reply()
         }

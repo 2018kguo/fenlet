@@ -55,19 +55,23 @@ def fixture(count, allow_portrait=True, mode="tiles"):
         screen = dict(id=f"screen-{index}", name=f"Display {index + 1}", built_in=count == 1, bounds=bounds,
                       usable={**bounds, "y": 30, "height": bounds["height"] - 60},
                       physical_size_mm=dict(width=336 if portrait else 598, height=598 if portrait else 336))
+        if mode == "spaces": screen["gather_space"] = 100 + index
         screens.append(screen)
-        if mode == "background" and index > 0: continue
+        if mode in ("background", "spaces") and index > 0: continue
         for position, app in enumerate(("Terminal", "Safari", "Notes")):
             w = dict(id=f"w-{index}-{position}", app_name=app, title=f"Example {position + 1}", pid=100,
                      process_instance="synthetic", accessible=True, minimized=False, is_focused=index == position == 0,
                      bounds=dict(x=bounds["x"] + 20, y=50, width=800, height=600))
             role = "minimize" if mode == "background" and position == 2 else "display_" + screen["id"]
+            if mode == "spaces": w.update(space_ids=[200 + position], fullscreen=position > 0)
             windows.append(w); decisions.append(dict(id=w["id"], role=role))
     if mode == "tiles":
         for app, title, role in (("Music", "Background example", "minimize"), ("Calendar", "Old example", "close")):
             w = {**windows[-1], "id": role, "app_name": app, "title": title, "is_focused": False}
+            if mode == "spaces": w.update(space_ids=[200 + position], fullscreen=position > 0)
             windows.append(w); decisions.append(dict(id=w["id"], role=role))
     inventory = dict(displays=screens, windows=windows, scan_ms=0, created_at=time.time(), coverage=dict(complete=True, errors=[]))
+    if mode == "spaces": inventory["all_spaces"] = True
     actions = build_actions(inventory, decisions)
     return dict(plan_path="synthetic", plan=dict(inventory=inventory, actions=actions), window_count=len(windows),
                 action_count=len(actions), model=None, coverage=dict(errors=[]))
@@ -155,7 +159,7 @@ def main():
         (directory / "bin/fenlet").symlink_to(ROOT / "bin/fenlet")
         build_fixture(executable)
         cases = [(count, True, "tiles") for count in args.counts]
-        if 2 in args.counts: cases += [(2, False, "tiles"), (2, False, "background")]
+        if 2 in args.counts: cases += [(2, False, "tiles"), (2, False, "background"), (2, False, "spaces")]
         for count, allow_portrait, mode in cases:
             path = directory / "input.json"
             preview = fixture(count, allow_portrait, mode)
@@ -193,7 +197,7 @@ def main():
                         centered = abs(a["x"] + a["width"] / 2 - b["x"] - b["width"] / 2) < 2 and abs(a["y"] + a["height"] / 2 - b["y"] - b["height"] / 2) < 2
                         ready = any(e.get("label") == "Confirm arrangement" and e.get("is_enabled") for e in data["ui_elements"])
                         if centered and len(plans) == 1 and ready: break
-                        if time.monotonic() >= deadline: raise AssertionError("Tile drag did not save and render the swapped draft.")
+                        if time.monotonic() >= deadline: raise AssertionError(f"Tile drag did not save and render the swapped draft: source={a}, target={b}, plans={len(plans)}, ready={ready}")
                         time.sleep(.1)
                     saved = json.loads(plans[0].read_text())
                     assert next(a for a in saved["actions"] if a["kind"] == "move")["window"]["id"] == "w-0-1"
@@ -221,13 +225,22 @@ def main():
                         time.sleep(.1)
                 if args.output:
                     args.output.mkdir(parents=True, exist_ok=True)
-                    name = f"widget-{count}" + ("-landscape" if not allow_portrait else "") + ("-background" if mode == "background" else "")
+                    name = f"widget-{count}" + ("-landscape" if not allow_portrait else "") + ("-"+mode if mode != "tiles" else "")
                     (args.output / f"{name}.json").write_text(json.dumps(data, indent=2))
                     capture = subprocess.run(["peekaboo", "see", "--window-id", str(window), "--path", str(args.output / f"{name}.png"), "--json"], capture_output=True, text=True)
                     assert json.loads(capture.stdout).get("success"), capture.stdout
-                if mode == "background": cancel_draft(window, data)
+                if mode in ("background", "spaces"): cancel_draft(window, data)
+                if mode == "spaces":
+                    data = snapshot(window)
+                    assert any(e.get("label", "").startswith("Gather destination") for e in data["ui_elements"]), "All Spaces destination is hidden."
+                    panes = [e["bounds"] for e in data["ui_elements"] if e.get("label", "").startswith("Preview ")]
+                    assert len(panes) == 3
+                    for i, a in enumerate(panes):
+                        for b in panes[i+1:]:
+                            assert min(a["x"]+a["width"], b["x"]+b["width"]) <= max(a["x"], b["x"]) or min(a["y"]+a["height"], b["y"]+b["height"]) <= max(a["y"], b["y"]), f"Other-Space thumbnails cover one another: {a}, {b}"
                 report.append(dict(displays=count, portrait_included=allow_portrait and count > 1, controls_visible=True, controls_pinned=True,
-                                   dispositions_visible=True, background_drag_restored=mode == "background", cancel_keeps_windows=True if mode == "background" else None,
+                                   dispositions_visible=True, background_drag_restored=mode == "background", cancel_keeps_windows=True if mode in ("background", "spaces") else None,
+                                   all_spaces_overview=mode == "spaces",
                                    last_display_reachable=True, drag_swap_saved=True if count == 1 else None))
             finally:
                 if process.poll() is None: process.terminate()

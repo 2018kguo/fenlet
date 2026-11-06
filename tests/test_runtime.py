@@ -51,7 +51,7 @@ class DecisionCacheTest(unittest.TestCase):
             # Editing/canceling a new draft does not replace the last confirmation.
             revise_plan(path, "minimize", "w-3")
             self.assertEqual(history_path.read_bytes(), history)
-            for field, value in (("process_instance", "reused-process"), ("bounds", {**observed["windows"][2]["bounds"], "x": 200})):
+            for field, value in (("process_instance", "reused-process"), ("bounds", {**observed["windows"][2]["bounds"], "x": 200}), ("space_ids", [99]), ("fullscreen", True)):
                 changed = copy.deepcopy(observed); changed["windows"][2][field] = value
                 with patch("fenlet.runtime.request_decisions", return_value=(classifier, {"latency_ms": 10})):
                     result, _ = decide(changed, "Arrange", use_cache=True)

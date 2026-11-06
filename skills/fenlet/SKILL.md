@@ -1,6 +1,6 @@
 ---
 name: fenlet
-description: Organize visible macOS windows into non-overlapping panes across any connected display setup, minimize useful background windows, close idle clutter. Uses the same engine as the Fenlet CLI and menu-bar widget.
+description: Organize macOS windows into non-overlapping panes across connected displays and Spaces, minimize useful background windows, close idle clutter. Uses the same engine as the Fenlet CLI and menu-bar widget.
 ---
 
 # Fenlet
@@ -25,7 +25,7 @@ scripts/fenlet check
 scripts/fenlet undo JOURNAL_PATH
 ```
 
-Use the final OS overlap check as evidence. Report remaining overlaps and inaccessible windows; never infer success from the number of delivered actions. Scope is visible windows on current Spaces, excluding Fenlet and Google Chrome for Testing. Other Spaces/fullscreen windows require the user to leave those Spaces/fullscreen first.
+Use the final OS overlap check as evidence. Report remaining overlaps and inaccessible windows; never infer success from the number of delivered actions. Default scope is visible windows on current Spaces, excluding Fenlet and Google Chrome for Testing. When intent includes other Spaces/fullscreen apps, use `--all-spaces`; `--display laptop` gathers onto the built-in display, or pass a connected display UUID. Read `coverage.errors`: unresolved windows are left alone. Fullscreen exits only during apply; macOS may animate or briefly change focus. The widget exposes All Spaces and a gather destination, with a read-only draft before confirmation.
 
 For deterministic operations without a model:
 
@@ -33,10 +33,11 @@ For deterministic operations without a model:
 scripts/fenlet snap left
 scripts/fenlet tile
 scripts/fenlet tile --yes
+scripts/fenlet tile --all-spaces --display laptop
 ```
 
 Snap supports left/right/top/bottom/full for the focused window. Tile previews/applies size-aware panes on each current display, minimizing windows that cannot fit. Ordinary layout requests use the model to choose which windows belong on each display.
 
-Each plan applies once and expires after 15 minutes. Windows changed since preview are preserved. Never blindly rerun an uncertain mutation. Observe the live state and journal; a confirmed minimum-size clamp or fixed obstacle permits a newly computed partition. Undo layout batches restores of moves/minimizes that have not subsequently changed. Classification can be reused for 60 seconds for identical inputs; inventory, geometry and actuation guards are always fresh. Fenlet only controls windows; it never scans Desktop files. Keep private plans, titles, credentials, and journals out of public commits.
+Each plan applies once and expires after 15 minutes. Windows changed since preview are preserved. Never blindly rerun an uncertain mutation. Observe the live state and journal; a confirmed minimum-size clamp or fixed obstacle permits a newly computed partition. Undo restores moves/minimizes, original regular Space membership, and fullscreen state that have not subsequently changed. Restoring fullscreen creates a new Space; its original order is not guaranteed. Do not force an Undo across a later manual Space change. Classification can be reused for 60 seconds for identical inputs; inventory, geometry and actuation guards are always fresh. Fenlet only controls windows; it never scans Desktop files. Keep private plans, titles, credentials, and journals out of public commits.
 
 The widget always shows a draft before applying. Drag edits and CLI `edit PLAN_PATH --swap WINDOW OTHER` / `--move WINDOW DISPLAY` create a new plan locally, with no model call or OS mutation. The agent may use the explicitly authorized one-shot CLI above.

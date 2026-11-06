@@ -8,7 +8,7 @@ import time
 import uuid
 from dataclasses import dataclass
 
-from .core import build_actions, same_bounds, valid_bounds, fits_tile, frames_overlap, eligible_windows, constrained_tiles, layout_report, revise_actions
+from .core import build_actions, same_bounds, same_space_state, valid_bounds, fits_tile, frames_overlap, eligible_windows, constrained_tiles, layout_report, revise_actions
 from .runtime import STATE, native_window_batch, private_dir, write_json, replace_private_json, native_json
 from .overlap import analyze_overlaps
 
@@ -38,7 +38,10 @@ def read_plan(path):
             raise ValueError("The focused window must be preserved.")
         if a["kind"] == "move":
             target = a["target"]
-            s = next(s for s in p["inventory"]["displays"] if s["id"] == a["display"])["usable"]
+            screen = next(s for s in p["inventory"]["displays"] if s["id"] == a["display"])
+            if p["inventory"].get("all_spaces") and (not screen.get("gather_space") or a.get("target_space") != screen["gather_space"]):
+                raise ValueError("The destination Space does not match this preview.")
+            s = screen["usable"]
             if not valid_bounds(target) or not (s["x"] <= target["x"] and s["y"] <= target["y"]
                 and target["x"] + target["width"] <= s["x"] + s["width"] + 1
                 and target["y"] + target["height"] <= s["y"] + s["height"] + 1):
@@ -79,7 +82,28 @@ def record_many(f, entries):
     os.fsync(f.fileno())
 
 
+def gathered(action, live):
+    return ("target_space" not in action or bool(live and live.get("fullscreen") is False
+            and live.get("space_ids") == [action["target_space"]]))
+
+
+def observed_window(original, raw):
+    return {**{k: v for k, v in original.items() if k not in ("space_ids", "fullscreen")}, **{k: raw[k] for k in ("bounds", "resizable", "min_size", "space_ids", "fullscreen") if k in raw},
+            "minimized": raw.get("minimized", None if "space_ids" in original else False)} if raw.get("bounds") else None
+
+
+def restored_window(original, live):
+    if not live or live.get("minimized") is not False:
+        return False
+    if original.get("fullscreen"):
+        # macOS creates a new fullscreen Space; its old numeric ID no longer exists.
+        return bool(live.get("fullscreen") and same_bounds(live["bounds"], original["bounds"], 2))
+    return same_space_state(original, live) and same_bounds(live["bounds"], original["bounds"], 2)
+
+
 def window_matches(action, live):
+    if not gathered(action, live) or live and not isinstance(live.get("minimized"), bool):
+        return False
     if action["kind"] == "close":
         return live is None
     if action["kind"] == "move" and live and live.get("resizable") is False:
@@ -125,7 +149,7 @@ def apply_window_batch(p, f):
         if r.get("skipped"):
             results[i] = {"ok": False, "skipped": True, "error": r.get("error", "Window changed since preview.")}
             continue
-        after = {**w, **{k: r[k] for k in ("resizable", "min_size") if k in r}, "bounds": r["bounds"], "minimized": r.get("minimized", False)} if r.get("bounds") else None
+        after = observed_window(w, r)
         verified = (r.get("closed") is True if action["kind"] == "close" else window_matches(action, after))
         results[i] = {"ok": verified, "after": after, "unchanged": bool(r.get("unchanged"))}
         if not verified:
@@ -134,7 +158,7 @@ def apply_window_batch(p, f):
     # one new partition from observed rectangles; never resend an uncertain move.
     for screen in p["inventory"]["displays"]:
         group = [(i, a) for i, a in selected if a["kind"] == "move" and a["display"] == screen["id"]]
-        if not group or not all(results[i].get("after") for i, _ in group):
+        if not group or not all(results[i].get("after") and gathered(a, results[i]["after"]) for i, a in group):
             continue
         clamped = any(results[i]["after"]["bounds"][k] > a["target"][k] + 1 for i, a in group for k in ("width", "height"))
         if not clamped:
@@ -163,7 +187,7 @@ def apply_window_batch(p, f):
         timings["reflow_ms"] = timings.get("reflow_ms", 0) + repair_batch.timings.get("native_process_ms", 0)
         for (i, _), repair in zip(group, repairs):
             r = observed[repair["window"]["id"]]
-            after = {**repair["window"], "bounds": r["bounds"], "minimized": r.get("minimized", False)} if r.get("bounds") else None
+            after = observed_window(repair["window"], r)
             was_unchanged = results[i].get("unchanged", False)
             results[i] = {"ok": not r.get("skipped") and window_matches(repair, after), "after": after,
                           "reflowed": True, "skipped": bool(r.get("skipped")), "unchanged": was_unchanged and bool(r.get("unchanged"))}
@@ -173,7 +197,7 @@ def apply_window_batch(p, f):
     # Preserve fixed windows, failed closes, and windows opened during the run.
     # Only confirmed movable windows participate in this new geometric repair.
     if layout_report(final_inventory)["overlap_count"]:
-        movable = {a["window"]["id"]: (i, a) for i, a in selected if a["kind"] == "move" and results[i].get("after") and not results[i].get("skipped")}
+        movable = {a["window"]["id"]: (i, a) for i, a in selected if a["kind"] == "move" and results[i].get("after") and not results[i].get("skipped") and gathered(a, results[i]["after"])}
         actual_windows = [{**w, **{k: results[movable[w["id"]][0]]["after"][k] for k in ("min_size", "resizable")
                                  if k in results[movable[w["id"]][0]]["after"]}} if w["id"] in movable else w for w in final_inventory["windows"]]
         decisions = [{"id": w["id"], "role": "display_" + movable[w["id"]][1]["display"] if w["id"] in movable else "unchanged"} for w in eligible_windows({"windows": actual_windows})]
@@ -190,7 +214,7 @@ def apply_window_batch(p, f):
             timings["obstacle_reflow_ms"] = repaired.timings.get("native_process_ms", 0)
             for i, repair in zip(indices, repairs):
                 raw_result = repaired.results[repair["window"]["id"]]
-                after = {**repair["window"], "bounds": raw_result["bounds"], "minimized": raw_result.get("minimized", False)} if raw_result.get("bounds") else None
+                after = observed_window(repair["window"], raw_result)
                 was_unchanged = results[i].get("unchanged", False)
                 results[i] = {"ok": not raw_result.get("skipped") and window_matches(repair, after), "after": after,
                               "applied_kind": repair["kind"], "skipped": bool(raw_result.get("skipped")),
@@ -199,7 +223,7 @@ def apply_window_batch(p, f):
                     results[i]["error"] = raw_result.get("error", "Window did not fit around a fixed window.")
             record(f, {"event": "repair_finished", "results": {str(i): results[i] for i in indices}})
     moved = [(i, r["after"]["bounds"]) for i, r in results.items()
-             if actions[i]["kind"] == "move" and r.get("after") and not r["after"].get("minimized") and not r.get("skipped")]
+             if actions[i]["kind"] == "move" and r.get("after") and gathered(actions[i], r["after"]) and not r["after"].get("minimized") and not r.get("skipped")]
     for index in analyze_overlaps([b for _, b in moved], example_limit=0).affected:
         i = moved[index][0]
         results[i]["ok"] = False
@@ -278,8 +302,11 @@ def undo_window_batch(started, finished, expected, undone, undo_started, journal
             record(journal, {"event": "finished", "index": i, "result": finished[i]})
             skipped.append({"index": i, "reason": "Original window is closed."})
             continue
-        live = {**original, "bounds": raw["bounds"], "minimized": raw.get("minimized", False)} if raw.get("bounds") else None
-        if i in undo_started and live and not live["minimized"] and same_bounds(live["bounds"], original["bounds"], 2):
+        live = observed_window(original, raw)
+        if live and not isinstance(live.get("minimized"), bool):
+            skipped.append({"index": i, "reason": "Window state unavailable; inspect before retrying."})
+            continue
+        if i in undo_started and restored_window(original, live):
             record(journal, {"event": "undone", "index": i, "recovered": True})
             restored += 1
             continue
@@ -291,13 +318,20 @@ def undo_window_batch(started, finished, expected, undone, undo_started, journal
                 skipped.append({"index": i, "reason": raw.get("error", "Interrupted change no longer matches its expected state.")})
                 continue
         after = finished[i]["after"]
-        if not live or live["minimized"] != after.get("minimized") or (not live["minimized"] and not same_bounds(live["bounds"], after["bounds"], 2)):
+        if not live or not same_space_state(live, after) or live["minimized"] != after.get("minimized") or (not live["minimized"] and not same_bounds(live["bounds"], after["bounds"], 2)):
             skipped.append({"index": i, "reason": "Window changed after tidy; preserved the current layout."})
             continue
-        if not live["minimized"] and same_bounds(live["bounds"], original["bounds"], 2):
+        if restored_window(original, live):
             record(journal, {"event": "undone", "index": i})
             continue
         action = {"kind": "restore", "window": live, "target": original["bounds"]}
+        if "fullscreen" in original:
+            action["target_fullscreen"] = original["fullscreen"]
+        if original.get("space_ids") and not original.get("fullscreen"):
+            if len(original["space_ids"]) != 1:
+                skipped.append({"index": i, "reason": "Cannot restore a window pinned to multiple Spaces."})
+                continue
+            action["target_space"] = original["space_ids"][0]
         selected.append((i, action))
     focus = observed.focus_check
     if selected:
@@ -306,7 +340,8 @@ def undo_window_batch(started, finished, expected, undone, undo_started, journal
         focus = result.focus_check
         for i, action in selected:
             raw = result.results[action["window"]["id"]]
-            if not raw.get("skipped") and raw.get("bounds") and not raw.get("minimized") and fits_tile(raw["bounds"], action["target"]):
+            record(journal, {"event": "undo_observed", "index": i, "result": raw})
+            if not raw.get("skipped") and restored_window(started[i]["window"], observed_window(action["window"], raw)):
                 record(journal, {"event": "undone", "index": i})
                 restored += 1
             else:

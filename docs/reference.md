@@ -6,6 +6,7 @@
 fenlet setup
 fenlet doctor
 fenlet scan
+fenlet scan --all-spaces
 fenlet arrange --yes       # classify and arrange in one run
 fenlet plan "Work on my big screen; chat on my laptop" --model jev
 fenlet apply PLAN_PATH --yes
@@ -18,6 +19,8 @@ fenlet check
 fenlet snap left        # focused window: left/right/top/bottom/full
 fenlet tile             # offline pane preview
 fenlet tile --yes       # apply offline panes on each current display
+fenlet tile --all-spaces --display laptop  # gather preview, without a model
+fenlet arrange --all-spaces --display laptop --yes
 
 fenlet undo JOURNAL_PATH
 ```
@@ -29,7 +32,7 @@ Plans expire after 15 minutes and apply once. Changes made after a preview are p
 
 ## Layout decisions
 
-Models select a connected display, minimize, close, or leave unchanged. The widget lists actual display names and scrolls when more displays are connected. Automatic uses the largest display for work, another display for chat when available, and a third for references when available. All groups share panes when only one display is connected. Saved display UUIDs fall back to Automatic when unplugged. Code partitions usable screen rectangles, reserves menu-bar/Dock space, applies 6-point gaps, favors tall columns, and respects exposed minimum sizes. OS-reported physical dimensions favor 6–8 inch text panes (7 inches ideal), including portrait layouts that use vertical space. Missing or estimated dimensions use point-based sizing; native minimum sizes and available space take priority. When panes cannot fit, lower-priority windows minimize. The focused window stays open. Arrangement never activates or raises apps. Video-app and video-title hints favor wider panes; these hints do not establish playback state.
+Models select a connected display, minimize, close, or leave unchanged. The widget lists actual display names and scrolls when more displays are connected. Automatic uses the largest display for work, another display for chat when available, and a third for references when available. All groups share panes when only one display is connected. Saved display UUIDs fall back to Automatic when unplugged. Code partitions usable screen rectangles, reserves menu-bar/Dock space, applies 6-point gaps, favors tall columns, and respects exposed minimum sizes. OS-reported physical dimensions favor 6–8 inch text panes (7 inches ideal), including portrait layouts that use vertical space. Missing or estimated dimensions use point-based sizing; native minimum sizes and available space take priority. When panes cannot fit, lower-priority windows minimize. The focused window stays open. Arrangement never activates or raises apps. macOS may change focus or animate while leaving fullscreen. Video-app and video-title hints favor wider panes; these hints do not establish playback state.
 
 Related work browsers and terminals stay adjacent within their chosen display. Explicitly unchanged windows are fixed obstacles. Some apps omit their minimum size. A confirmed resize clamp triggers one new partition using the measured dimensions. Failed closes and newly opened windows become fixed obstacles in a bounded geometric repair. Actual OS rectangles are checked afterward. `fenlet check` reports the exact overlap count and up to 32 examples; a partial run does not mean the desktop is clean.
 
@@ -37,4 +40,15 @@ Opening a draft keeps windows in their current slots when they already fit the c
 
 Repeat previews reuse placements from the last confirmed arrangement while window identities, positions, and instructions still match. This keeps a cached model classification from minimizing a window you chose to keep visible. New windows are classified normally; moved or replaced windows and changed instructions are evaluated afresh. The shared engine records the confirmed journal pointer for both CLI and widget runs.
 
-The engine operates on visible windows in the current Spaces. It leaves fullscreen/other-Space windows, protected dialogs, unsaved work, and unrelated browser-test windows alone. It never force-quits an app or clicks Discard. A normal close cannot always be undone; “Undo” restores moves/minimizes and keeps later manual changes intact.
+The default scope is visible windows in the current Spaces. `scan`, `tile`, `plan`, and `arrange` accept `--all-spaces`; `tile`, `plan`, and `arrange` also accept `--display DISPLAY_UUID` or `--display laptop`. All Spaces gathers selected windows onto an existing regular Desktop and exits fullscreen only during apply. Unsupported or unresolved windows are reported. Protected dialogs, unsaved work, and unrelated browser-test windows stay open. It never force-quits an app or clicks Discard. A normal close cannot always be undone; “Undo” restores moves/minimizes and keeps later manual changes intact.
+
+## Space discovery
+
+Cross-Space discovery and transfers use optional WindowServer/Accessibility
+entry points. The [Hammerspoon Spaces implementation](https://github.com/Hammerspoon/hammerspoon/blob/master/extensions/spaces/libspaces.m)
+documents the workspace compatibility transaction used on macOS 14.5+;
+[AltTab's AX wrapper](https://github.com/quasa0/alt-tab-macos-unchained/blob/main/src/api-wrappers/AXUIElement.swift)
+describes why ordinary `AXWindows` enumeration misses other Spaces. Fenlet bounds
+remote-element discovery per process and verifies the exact process, window ID,
+source Space, fullscreen state, destination Space and resulting rectangle.
+Missing discovery coverage is not evidence that a window was closed.

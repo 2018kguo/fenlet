@@ -15,6 +15,8 @@ rest. It adapts to a laptop alone, several displays, and portrait monitors.
 A small native widget, a CLI, and an agent skill share the same planner.
 Click **Arrange windows**, adjust the draft by dragging tiles, then
 **Confirm arrangement**. Nothing moves or closes before confirmation.
+Choose **All Spaces → Laptop** to bring fullscreen apps and windows from other
+Spaces together onto your laptop.
 
 <p align="center"><a href="docs/demo.mp4"><img src="docs/demo.gif" width="1100" alt="Nine overlapping windows become a focused workspace: browser beside terminal on the work display, chat and references on the laptop, and clutter out of the way."></a></p>
 <p align="center"><sub>Arrange. Review. Back to work. <a href="docs/demo.mp4">Watch in full quality</a>.<br>Illustrated desktop with the real Fenlet widget and planner. Example content; timing is illustrative.</sub></p>

@@ -11,6 +11,10 @@ import SwiftUI
         let store = Store()
         store.journal = nil
         store.liveInventory = preview.plan.inventory
+        if preview.plan.inventory.all_spaces == true {
+            store.settings.allSpaces = true
+            store.settings.gatherScreen = preview.plan.inventory.displays.first?.id
+        }
         store.preview = preview; store.hasLayout = true; store.liveReadOK = true
         let demo = CommandLine.arguments.contains("--demo") || CommandLine.arguments.contains("--demo-live")
         if demo {

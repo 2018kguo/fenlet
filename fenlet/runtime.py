@@ -13,7 +13,7 @@ import atexit
 import select
 import threading
 
-from .core import model_state, validate_decisions, available_roles, eligible_windows, same_bounds
+from .core import model_state, validate_decisions, available_roles, eligible_windows, same_bounds, same_space_state
 from .questions import ESCALATE_BELOW_PROBABILITY, placements, jev_payload
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -131,8 +131,8 @@ def native_window_batch(actions, *, expected_displays=None):
     started = time.monotonic()
     # Only Close needs the full title for its contents-changed guard.
     requests = [{"kind": a["kind"], "window": {k: a["window"][k] for k in
-                 (("id", "pid", "process_instance", "bounds", "title", "title_source") if a["kind"] == "close" else ("id", "pid", "process_instance", "bounds", "minimized")) if k in a["window"]},
-                 **({"target": a["target"]} if a.get("target") else {})} for a in actions]
+                 (("id", "pid", "process_instance", "bounds", "minimized", "space_ids", "fullscreen", "title", "title_source") if a["kind"] == "close" else ("id", "pid", "process_instance", "bounds", "minimized", "space_ids", "fullscreen")) if k in a["window"]},
+                 **{k: a[k] for k in ("target", "target_space", "target_fullscreen") if k in a}} for a in actions]
     data = native_json("windows", {"actions": requests, "expected_displays": expected_displays})
     results = data["results"]
     if len(results) != len(actions) or {r["id"] for r in results} != {a["window"]["id"] for a in actions}:
@@ -233,9 +233,9 @@ def native():
     return str(binary)
 
 
-def inventory():
+def inventory(*, all_spaces=False):
     start = time.monotonic()
-    observed = native_json("inventory")
+    observed = native_json("inventory", {"all_spaces": True}) if all_spaces else native_json("inventory")
     displays, windows = observed["displays"], observed["windows"]
     candidates = [w for w in windows if w["app_name"] not in ("Fenlet", "Google Chrome for Testing")]
     constraints_path = STATE / "window-constraints.json"
@@ -263,7 +263,7 @@ def inventory():
     prior_windows = [w for w in windows if str(w["pid"]) == prior_pid and not w.get("minimized")]
     if prior_windows and not any(w.get("is_focused") for w in windows):
         prior_windows[0]["is_focused"] = True
-    return {"created_at": time.time(), "displays": displays, "windows": windows,
+    return {"created_at": time.time(), "displays": displays, "windows": windows, "all_spaces": all_spaces,
             "coverage": observed["coverage"],
             "scan_ms": round((time.monotonic() - start) * 1000)}
 
@@ -309,7 +309,8 @@ def verified_layout_roles(inv, intent):
         if entries[0].get("scope") != "windows":
             return {}
         plan = json.loads(Path(entries[0]["plan_path"]).read_text())
-        if plan["intent"] != intent or plan["inventory"].get("display_preferences", {}) != inv.get("display_preferences", {}):
+        if (plan["intent"] != intent or plan["inventory"].get("display_preferences", {}) != inv.get("display_preferences", {})
+            or plan["inventory"].get("all_spaces", False) != inv.get("all_spaces", False)):
             return {}
         finished = {e["index"]: e["result"] for e in entries if e["event"] == "finished"}
         current = {w["id"]: w for w in eligible_windows(inv)}
@@ -322,7 +323,7 @@ def verified_layout_roles(inv, intent):
             after = result.get("after") or {}
             live = current.get(action["window"]["id"])
             if (live and live["pid"] == after.get("pid") and live.get("process_instance") == after.get("process_instance")
-                and not after.get("minimized") and same_bounds(live["bounds"], after["bounds"], 2)):
+                and not after.get("minimized") and same_space_state(live, after) and same_bounds(live["bounds"], after["bounds"], 2)):
                 roles[live["id"]] = "display_" + action["display"]
         return roles
     except (OSError, ValueError, KeyError, TypeError, IndexError):

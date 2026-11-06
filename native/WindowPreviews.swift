@@ -140,7 +140,7 @@ import SwiftUI
             let started = Date()
             guard #available(macOS 14.0, *), !requested.isEmpty else { return }
             do {
-                let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+                let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: !requested.contains { $0.space_ids != nil })
                 guard !Task.isCancelled, revision == generation else { return }
                 let available = Dictionary(uniqueKeysWithValues: content.windows.map { ($0.windowID, $0) })
                 for offset in stride(from: 0, to: requested.count, by: 3) {
