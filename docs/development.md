@@ -62,8 +62,16 @@ menu-bar popover once. Neither flag applies a layout.
    bash scripts/package.sh build/Fenlet.app
    ```
 
-3. If a notarization profile is available, submit the ZIP and wait for
-   **Accepted**, staple the app, and repackage:
+3. Create a local notarization profile once. Use an
+   [app-specific password](https://support.apple.com/en-us/102654); the command
+   prompts for it and saves it in Keychain. Apple may require you to accept
+   updated developer agreements in your account first.
+
+   ```sh
+   xcrun notarytool store-credentials PROFILE --apple-id YOUR_APPLE_ID --team-id TEAMID
+   ```
+
+   Submit the ZIP and wait for **Accepted**, staple the app, and repackage:
 
    ```sh
    xcrun notarytool submit build/Fenlet-macos-arm64.zip --keychain-profile PROFILE --wait

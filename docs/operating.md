@@ -6,11 +6,10 @@ Download the ZIP from [Releases](https://github.com/2018kguo/fenlet/releases),
 unzip it, and move **Fenlet.app** into Applications. The app includes Python
 and its native helper; you do not need Homebrew, Python, or browser tools.
 
-The first public preview is Developer ID signed but not notarized. If macOS
-blocks it, use **System Settings → Privacy & Security → Open Anyway** only
-if you trust this download. [Apple describes the security check here](https://support.apple.com/en-us/102445).
-Checksums are published with every archive. No system security setting needs
-to be disabled.
+Release downloads are Developer ID signed and notarized by Apple. macOS may
+ask you to confirm opening an app downloaded from the internet.
+[Apple describes the security check here](https://support.apple.com/en-us/102445).
+Checksums are published with every archive.
 
 Open Fenlet's menu-bar icon. Setup guides you through:
 

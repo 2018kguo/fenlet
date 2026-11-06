@@ -32,8 +32,8 @@ macOS 13+; real window thumbnails need macOS 14+ and Screen Recording permission
 The app includes its runtime. No Homebrew, Python install, browser extension,
 or background server is needed.
 
-This first public preview is **Developer ID signed, not notarized**. macOS may
-ask you to approve the app in Privacy & Security. See [first-launch instructions](docs/operating.md#first-launch).
+Release downloads are **Developer ID signed and notarized by Apple**. See
+[first-launch instructions](docs/operating.md#first-launch) for permissions and setup.
 
 To build from source:
 
