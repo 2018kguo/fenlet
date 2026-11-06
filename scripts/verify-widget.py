@@ -144,6 +144,41 @@ def cancel_draft(window, data):
         time.sleep(.1)
 
 
+def verify_onboarding(executable, directory, environment, output):
+    path = directory / "setup-preview.json"
+    path.write_text(json.dumps(fixture(1)))
+    permission = directory / "permissions.json"
+    process = subprocess.Popen([str(executable), str(path), "--onboarding", "--permission-file", str(permission)],
+                               stdout=subprocess.PIPE, text=True, env=environment)
+    try:
+        assert select.select([process.stdout], [], [], 10)[0], "Onboarding did not open."
+        window = int(process.stdout.readline())
+        data = snapshot(window)
+        root = next(e["bounds"] for e in data["ui_elements"] if e.get("ax_role") == "AXWindow")
+        for name in ("Allow window control", "Allow window previews"):
+            button = next(e for e in data["ui_elements"] if e.get("label") == name)
+            bounds = button["bounds"]
+            assert bounds["height"] >= 40 and bounds["width"] >= 300, button
+            assert root["y"] <= bounds["y"] and bounds["y"] + bounds["height"] <= root["y"] + root["height"]
+        if output:
+            capture = subprocess.run(["peekaboo", "see", "--window-id", str(window), "--path", str(output / "onboarding.png"), "--json"], capture_output=True, text=True)
+            assert json.loads(capture.stdout).get("success"), capture.stdout
+        for accessibility, recording, absent, present in (
+                (True, False, "Allow window control", "Allow window previews"),
+                (True, True, "Allow window previews", "Confirm arrangement")):
+            permission.write_text(json.dumps(dict(accessibility=accessibility, screen_recording=recording)))
+            deadline = time.monotonic() + 3
+            while True:
+                labels = {e.get("label") for e in snapshot(window)["ui_elements"]}
+                if absent not in labels and present in labels: break
+                assert time.monotonic() < deadline, "A new permission did not update onboarding automatically."
+                time.sleep(.1)
+        return dict(onboarding_permissions_visible=True, large_permission_buttons=True, permission_grants_auto_refresh=True)
+    finally:
+        if process.poll() is None: process.terminate()
+        process.wait(timeout=3); process.stdout.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, help="Optional directory for synthetic PNGs and AX evidence")
@@ -167,7 +202,7 @@ def main():
             plan_path = directory / "plan.json"; plan_path.write_text(json.dumps(plan))
             preview["plan_path"] = str(plan_path); path.write_text(json.dumps(preview))
             environment = {**os.environ, "FENLET_STATE": str(directory / "state"), "FENLET_CONFIG": str(directory / "config.json")}
-            process = subprocess.Popen([str(executable), str(path)], stdout=subprocess.PIPE, text=True, env=environment)
+            process = subprocess.Popen([str(executable), str(path), "--verify-state"], stdout=subprocess.PIPE, text=True, env=environment)
             try:
                 if not select.select([process.stdout], [], [], 10)[0]:
                     raise TimeoutError("Widget fixture did not create a window.")
@@ -245,6 +280,7 @@ def main():
             finally:
                 if process.poll() is None: process.terminate()
                 process.wait(timeout=3); process.stdout.close()
+        report.append(verify_onboarding(executable, directory, environment, args.output))
     print(json.dumps(dict(synthetic=True, results=report)))
 
 

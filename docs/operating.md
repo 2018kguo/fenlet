@@ -14,11 +14,19 @@ Checksums are published with every archive.
 Open Fenlet's menu-bar icon. Setup guides you through:
 
 1. **Accessibility** for window control. Enable the app in System Settings,
-   then return and check setup again.
-2. **A provider key**, saved in your Keychain. Vercel AI Gateway supports all
+   then return to Fenlet. Setup detects the permission automatically while open.
+2. **Screen Recording** for real window thumbnails on macOS 14+. Enable Fenlet
+   in Screen & System Audio Recording. If macOS asks, choose Quit & Reopen.
+   Fenlet shows a restart button when a grant needs a fresh process. You can
+   explicitly skip previews and arrange using app names instead.
+3. **A provider key**, saved in your Keychain. Vercel AI Gateway supports all
    model choices; OpenRouter supports Nemotron and Beam.
-3. **Screen Recording**, optional, for real window thumbnails on macOS 14+.
-   Arrangement works without thumbnails.
+
+If Accessibility already shows Fenlet enabled but setup still reports it
+blocked, remove that Fenlet entry and add the installed copy again. A grant
+from an earlier development build can refer to its old code signature.
+macOS may ask you to authenticate this change. Release builds use a stable
+Developer ID identity so subsequent signed updates retain that identity.
 
 In Settings, **Install CLI & skill** adds `~/.local/bin/fenlet` to your zsh
 PATH and links the included skill into `~/.codex/skills/fenlet`. Open a new
@@ -96,3 +104,8 @@ not in these files. `--env-file PATH` is an explicit alternative for CLI use.
 `fenlet doctor` checks the runtime, provider key, and Accessibility permission
 without arranging anything. `fenlet scan` reads windows; `fenlet check`
 measures actual overlap. All three return JSON. See the [reference](reference.md).
+
+Short screens keep text panes at least 600 logical points tall when space allows.
+Extra work windows go to the visible minimize tray in the draft, rather than
+forcing a short 2×2 grid. Tall displays can stack readable panes. The focused
+work window and its browser/terminal companion take priority over setup tools.

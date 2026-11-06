@@ -7,7 +7,7 @@ import subprocess
 from . import __version__
 from .core import DEFAULT_INTENT, eligible_windows, snap_frame, screen_key, screen_for_window
 from .operations import apply, read_plan, save_plan, summary, undo, audit_layout, revise_plan
-from .runtime import decide, inventory, load_env, doctor, save_provider_key, install_cli, install_skill, run_json, native
+from .runtime import decide, inventory, load_env, doctor, save_provider_key, install_cli, install_skill, run_json, native, native_json
 
 
 def resolve_display(inventory, selector):
@@ -58,6 +58,7 @@ def main():
     restore.add_argument("journal_path")
     health = sub.add_parser("doctor", help="Check runtime, macOS permission, and provider setup")
     health.add_argument("--provider", choices=["gateway", "openrouter"], default="gateway")
+    health.add_argument("--permissions-only", action="store_true", help="Read window-control permission without accessing provider credentials")
     setup = sub.add_parser("setup", help="Set up window control, provider access, and the CLI")
     setup.add_argument("--provider", choices=["gateway", "openrouter"], default="gateway")
     setup.add_argument("--key-stdin", action="store_true", help="Read a key privately from stdin into Keychain")
@@ -67,7 +68,7 @@ def main():
     args = parser.parse_args()
     started = time.monotonic()
     try:
-        if args.env_file:
+        if args.env_file and not (args.command == "doctor" and args.permissions_only):
             load_env(args.env_file)
         if args.command == "check":
             result = audit_layout()
@@ -87,6 +88,8 @@ def main():
                 actions = [{"kind": "move", "window": w, "target": snap_frame(args.zone, screen["usable"]), "display": screen["id"], "display_name": screen["name"]}]
                 path, p = save_plan(inv, None, "Snap focused window.", None, actions=actions)
                 result = apply(path)
+        elif args.command == "doctor" and args.permissions_only:
+            result = native_json("permissions")
         elif args.command in ("doctor", "setup"):
             if args.command == "setup":
                 if args.key_stdin:

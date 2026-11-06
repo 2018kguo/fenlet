@@ -19,6 +19,28 @@ def inventory(windows):
 
 
 class LayoutTest(unittest.TestCase):
+    def test_short_laptop_keeps_work_pair_tall_and_backgrounds_overflow(self):
+        ws = [window("settings", "System Settings"), window("chat", "Google Chrome"),
+              window("terminal", "Rex Beta", focused=True), window("browser", "Google Chrome")]
+        ws[1]["title"] = "Example (Channel) - Team - Slack - Google Chrome"
+        inv = inventory(ws)
+        inv["displays"] = [dict(id="laptop", name="Laptop", built_in=True,
+            bounds=dict(x=0, y=0, width=1512, height=982), usable=dict(x=0, y=33, width=1512, height=905),
+            physical_size_mm=dict(width=336, height=218), physical_size_source="system_reported")]
+        actions = build_actions(inv, [{"id": w["id"], "role": "display_laptop"} for w in ws])
+        moves = [a for a in actions if a["kind"] == "move"]
+        self.assertEqual([a["window"]["id"] for a in moves], ["terminal", "browser"])
+        self.assertTrue(all(a["target"]["height"] == 893 for a in moves))
+        self.assertEqual({a["window"]["id"] for a in actions if a["kind"] == "minimize"}, {"settings", "chat"})
+
+    def test_portrait_display_can_stack_readable_panes(self):
+        ws = [window(f"w-{i}") for i in range(4)]
+        usable = dict(x=0, y=30, width=1080, height=1860)
+        frames = constrained_tiles(ws, usable)
+        self.assertIsNotNone(frames)
+        self.assertTrue(all(f["height"] >= 600 for f in frames))
+        self.assertFalse(any(frames_overlap(a, b) for i, a in enumerate(frames) for b in frames[i+1:]))
+
     def test_explicitly_fixed_window_is_an_obstacle_to_other_panes(self):
         ws = [window("fixed", "Safari"), window("terminal", "Ghostty", focused=True), window("editor", "Code")]
         ws[0]["bounds"] = {"x": -1400, "y": -450, "width": 1000, "height": 1000}

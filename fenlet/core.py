@@ -7,6 +7,18 @@ PANE_GAP = 6
 VIDEO_APPS = {"TV", "QuickTime Player", "VLC", "IINA", "mpv"}
 BROWSER_APPS = {"Safari", "Google Chrome", "Firefox", "Arc", "Brave Browser", "Microsoft Edge", "Zen", "Orion"}
 TERMINAL_APPS = {"Terminal", "Ghostty", "Rex", "Rex Beta", "iTerm2", "Alacritty", "WezTerm", "Warp", "Rio"}
+UTILITY_APPS = {"System Settings", "System Preferences", "Keychain Access", "Activity Monitor"}
+COMMUNICATION_APPS = {"Slack", "Messages", "Mail", "Discord", "Microsoft Teams", "WhatsApp"}
+
+
+def window_usage(window):
+    app = window["app_name"]
+    if app in UTILITY_APPS or window.get("bundle_id") in ("com.apple.systempreferences", "com.apple.keychainaccess", "com.apple.ActivityMonitor"):
+        return "utility"
+    title = window.get("title", "").casefold()
+    if app in COMMUNICATION_APPS or app in BROWSER_APPS and any(hint in title for hint in (" - slack - ", " | slack", "microsoft teams", " - discord")):
+        return "communication"
+    return "terminal" if app in TERMINAL_APPS else "browser" if app in BROWSER_APPS else "other"
 
 
 def preferred_aspect(window):
@@ -95,7 +107,7 @@ def model_state(inventory, intent):
             "displays": [{k: s[k] for k in ("id", "name", "built_in", "usable")}
                          for s in inventory["displays"]],
             "windows": [{**{k: w.get(k) for k in ("id", "app_name", "title", "is_focused")},
-                         "application_kind": "terminal" if w["app_name"] in TERMINAL_APPS else "browser" if w["app_name"] in BROWSER_APPS else "other"}
+                         "application_kind": window_usage(w)}
                         for w in eligible_windows(inventory)]}
 
 
@@ -145,6 +157,15 @@ def window_minimum(window):
     return limits
 
 
+def layout_minimum(window, usable):
+    minimum = dict(window_minimum(window))
+    if window.get("resizable") is not False and preferred_aspect(window) < 1:
+        # A native minimum is not a readable text pane. Short displays keep
+        # full-height work columns; portrait displays can still stack panes.
+        minimum["height"] = max(minimum["height"], min(600, usable["height"] - 2 * PANE_GAP))
+    return minimum
+
+
 def physical_size(screen):
     """OS-reported, orientation-aligned millimeters; unknown is never inches."""
     if not screen or screen.get("physical_size_source") == "estimated":
@@ -185,7 +206,7 @@ def _strip_tiles(windows, usable, strips, vertical):
     for count in counts:
         groups.append(list(range(offset, offset + count))); offset += count
     outer, inner = ("width", "height") if vertical else ("height", "width")
-    mins = [window_minimum(w) for w in windows]
+    mins = [layout_minimum(w, usable) for w in windows]
     outer_sizes = _spread([max(mins[i][outer] for i in g) for g in groups], usable[outer])
     if outer_sizes is None:
         return None
@@ -198,7 +219,7 @@ def _strip_tiles(windows, usable, strips, vertical):
         cursor = usable["y" if vertical else "x"] + PANE_GAP
         for index, size in zip(group, sizes):
             x, y, width, height = (position, cursor, outer_size, size) if vertical else (cursor, position, size, outer_size)
-            frame = {"x": round(x), "y": round(y), "width": math.floor(width), "height": math.floor(height)}
+            frame = {"x": round(x), "y": round(y), "width": round(x + width) - round(x), "height": round(y + height) - round(y)}
             if windows[index].get("resizable") is False:
                 frame.update(width=windows[index]["bounds"]["width"], height=windows[index]["bounds"]["height"])
             frames[index] = frame
@@ -232,7 +253,7 @@ def constrained_tiles(windows, usable, screen=None):
     """
     if not windows:
         return []
-    minimums = [window_minimum(w) for w in windows]
+    minimums = [layout_minimum(w, usable) for w in windows]
     max_rows = max(0, min(len(windows), math.floor((usable["height"] - PANE_GAP) / (min(m["height"] for m in minimums) + PANE_GAP))))
     max_columns = max(0, min(len(windows), math.floor((usable["width"] - PANE_GAP) / (min(m["width"] for m in minimums) + PANE_GAP))))
     if not max_columns or not max_rows or len(windows) > max_rows * max_columns:
@@ -293,16 +314,17 @@ def free_regions(usable, fixed, minimum=None):
 
 def pack_regions(windows, regions, screen=None, order=None):
     pending, packed = list(windows), []
-    limits = {w["id"]: window_minimum(w) for w in windows}
     for region in regions:
+        limits = {w["id"]: layout_minimum(w, screen["usable"] if screen else region) for w in pending}
         compatible = [w for w in pending if all(limits[w["id"]][axis] + 2 * PANE_GAP <= region[axis] for axis in ("width", "height"))]
         if not compatible:
             continue
+        compatible = sorted(compatible, key=lambda w: order.get(w["id"], len(order))) if order is not None else companion_order(compatible)
         minimum_width = min(limits[w["id"]]["width"] for w in compatible)
         minimum_height = min(limits[w["id"]]["height"] for w in compatible)
         capacity = math.floor((region["width"] - PANE_GAP) / (minimum_width + PANE_GAP)) * math.floor((region["height"] - PANE_GAP) / (minimum_height + PANE_GAP))
         for count in range(min(len(compatible), capacity), 0, -1):
-            ordered = sorted(compatible[:count], key=lambda w: order.get(w["id"], len(order))) if order is not None else companion_order(compatible[:count])
+            ordered = compatible[:count]
             frames = constrained_tiles(ordered, region, screen)
             if frames is not None:
                 packed.extend(zip(ordered, frames))
@@ -371,7 +393,7 @@ def build_actions(inventory, decisions, layout_order=None):
         for overflow in overflow_windows:
             if overflow["is_focused"]:
                 raise ValueError("The focused window cannot fit this display. Choose a larger display.")
-            actions.append({"kind": "minimize", "window": overflow, "reason": "No remaining pane fits this window's minimum size."})
+            actions.append({"kind": "minimize", "window": overflow, "reason": "Kept in the background so visible panes remain readable."})
         for w, target in packed:
             gathering = inventory.get("all_spaces", False)
             if gathering and not screen.get("gather_space"):
@@ -385,16 +407,18 @@ def build_actions(inventory, decisions, layout_order=None):
 
 def companion_order(windows):
     """Keep a work browser and terminal adjacent without changing destinations."""
-    browsers = [w for w in windows if w["app_name"] in BROWSER_APPS]
-    terminals = [w for w in windows if w["app_name"] in TERMINAL_APPS]
+    focused = [w for w in windows if w.get("is_focused")]
+    windows = focused + sorted([w for w in windows if not w.get("is_focused")], key=lambda w: window_usage(w) in ("utility", "communication"))
+    browsers = [w for w in windows if window_usage(w) == "browser"]
+    terminals = [w for w in windows if window_usage(w) == "terminal"]
     if not browsers or not terminals:
         return windows
     pair_ids = {w["id"] for w in browsers + terminals}
     terminal_ids = {w["id"] for w in terminals}
     first = next((w for w in windows if w.get("is_focused") and w["id"] in pair_ids), terminals[0])
     partner = browsers[0] if first["id"] in terminal_ids else terminals[0]
-    chosen = {first["id"], partner["id"]}
-    return [first, partner, *(w for w in windows if w["id"] not in chosen)]
+    chosen = {w["id"] for w in focused} | {first["id"], partner["id"]}
+    return focused + [w for w in (first, partner) if w["id"] not in {f["id"] for f in focused}] + [w for w in windows if w["id"] not in chosen]
 
 
 def revise_actions(inventory, actions, operation, window_id, target=None):

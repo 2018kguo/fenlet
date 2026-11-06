@@ -5,6 +5,7 @@
 ```sh
 fenlet setup
 fenlet doctor
+fenlet doctor --permissions-only  # no provider or Keychain access
 fenlet scan
 fenlet scan --all-spaces
 fenlet arrange --yes       # classify and arrange in one run

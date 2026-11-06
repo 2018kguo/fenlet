@@ -18,6 +18,15 @@ def batch(results):
 
 
 class SafetyTest(unittest.TestCase):
+    def test_contained_app_frame_succeeds_but_overlap_or_displacement_does_not(self):
+        from fenlet.operations import window_matches
+        w = window("settings", "System Settings")
+        action = {"kind": "move", "window": w, "target": dict(x=759, y=39, width=747, height=893)}
+        actual = {**w, "bounds": dict(x=759, y=39, width=723, height=470)}
+        self.assertTrue(window_matches(action, actual))
+        for change in (dict(width=770), dict(x=780), dict(height=910)):
+            self.assertFalse(window_matches(action, {**actual, "bounds": {**actual["bounds"], **change}}))
+
     def test_failed_close_becomes_fixed_obstacle_without_repeating_close(self):
         from fenlet.core import build_actions, frames_overlap
         work, browser, clutter = window(focused=True, x=-2500), window("w-2", "Safari", x=-2500), window("w-3", "Finder", x=-2500)

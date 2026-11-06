@@ -14,6 +14,21 @@ from tests.test_core import inventory, window
 
 
 class CLITest(unittest.TestCase):
+    def test_permission_refresh_works_without_provider_credentials(self):
+        observed = []
+        with patch("fenlet.__main__.doctor", side_effect=AssertionError("Credential check during permission refresh")), \
+             patch("fenlet.__main__.load_env", side_effect=AssertionError("Credential file read during permission refresh")), \
+             patch("fenlet.__main__.native_json", side_effect=[{"accessibility": False}, {"accessibility": True}]) as native:
+            for _ in range(2):
+                output = io.StringIO()
+                with patch("sys.argv", ["fenlet", "--env-file", "unused", "doctor", "--permissions-only"]), redirect_stdout(output):
+                    main()
+                response = json.loads(output.getvalue())
+                self.assertTrue(response["ok"])
+                observed.append(response["data"]["accessibility"])
+            self.assertEqual(observed, [False, True])
+            self.assertEqual(native.call_count, 2)
+
     def test_edit_dispatches_the_local_plan_revision_without_reading_the_desktop(self):
         inv = {**inventory([window(focused=True), window("w-2", "Safari")]),
                "created_at": time.time(), "scan_ms": 0, "coverage": {"complete": True, "errors": []}}

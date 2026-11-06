@@ -19,6 +19,8 @@ def fixture():
     inv = {**inventory(windows), "all_spaces": True, "created_at": time.time(), "coverage": {"complete": True}, "scan_ms": 0}
     for screen, space in zip(inv["displays"], (10, 20)):
         screen["gather_space"] = space
+    # This membership fixture has room for three readable work columns.
+    inv["displays"][1]["usable"]["width"] = 1920
     return inv
 
 

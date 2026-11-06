@@ -47,6 +47,7 @@ struct InventoryInfo: Decodable {
 }
 struct PlanInfo: Decodable { let inventory: InventoryInfo; let actions: [ActionInfo] }
 struct DoctorInfo: Decodable { let accessibility, key_configured, runtime_ready: Bool }
+struct PermissionInfo: Decodable { let accessibility, screen_recording: Bool }
 struct CoverageInfo: Decodable {
     struct ScanError: Decodable { let app: String }
     let errors: [ScanError]
@@ -66,11 +67,13 @@ struct PreviewInfo: Decodable {
 }
 struct Envelope<T: Decodable>: Decodable { let ok: Bool; let data: T?; let error: String? }
 struct ApplyInfo: Decodable {
+    struct Change: Decodable { let ok: Bool; let error: String? }
     struct LayoutCheck: Decodable { let overlap_count: Int; let windows: [WindowInfo]; let displays: [ScreenInfo] }
     let journal_path: String
     let succeeded, failed, planned, apply_ms, closed, arranged, minimized: Int
     let undoable: Bool
     let layout_check: LayoutCheck?
+    var results: [Change]? = nil
 }
 struct UndoInfo: Decodable {
     struct Skip: Decodable { let reason: String }
@@ -88,6 +91,28 @@ struct Settings: Codable {
     var customInstructions: String?
     var allSpaces: Bool?
     var gatherScreen: String?
+    var skipWindowPreviews: Bool?
+}
+
+enum LayoutPresentation {
+    case live(PreviewInfo?), draft(PreviewInfo), stale(PreviewInfo)
+    var preview: PreviewInfo? {
+        switch self { case .live(let p): return p; case .draft(let p), .stale(let p): return p }
+    }
+    var isDraft: Bool { if case .draft = self { return true }; return false }
+}
+
+struct WorkFocus {
+    let pid: pid_t
+    let windowID: String
+    static func capture(_ app: NSRunningApplication?) -> WorkFocus? {
+        guard let app, app.processIdentifier != ProcessInfo.processInfo.processIdentifier,
+              !["com.apple.systempreferences", "com.apple.keychainaccess", "com.apple.ActivityMonitor"].contains(app.bundleIdentifier ?? ""),
+              let rows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]],
+              let row = rows.first(where: { ($0[kCGWindowOwnerPID as String] as? Int32) == app.processIdentifier && ($0[kCGWindowLayer as String] as? Int) == 0 }),
+              let number = row[kCGWindowNumber as String] as? UInt32 else { return nil }
+        return WorkFocus(pid: app.processIdentifier, windowID: "w-\(number)")
+    }
 }
 
 enum TidyError: LocalizedError {
@@ -105,12 +130,25 @@ enum TidyError: LocalizedError {
     @Published var liveReadOK = false
     private var liveTask: Task<Void, Never>?
     private var desktopRevision = 0
-    @Published var preview: PreviewInfo?
+    @Published var presentation = LayoutPresentation.live(nil)
+    var preview: PreviewInfo? {
+        get { presentation.preview }
+        set {
+            if let newValue, presentation.isDraft { presentation = .draft(newValue) }
+            else { presentation = .live(newValue) }
+        }
+    }
     @Published var busy = false
     @Published var status = "Ready when you are."
     @Published var error: String?
     @Published var settings = Settings()
-    @Published var hasLayout = false
+    var hasLayout: Bool {
+        get { presentation.isDraft }
+        set {
+            guard let p = preview else { return }
+            presentation = newValue ? .draft(p) : p.plan.actions.isEmpty ? .live(p) : .stale(p)
+        }
+    }
     @Published var editingDraft = false
     @Published var draggedWindowID: String?
     private var instructionSaveTask: Task<Void, Never>?
@@ -118,9 +156,13 @@ enum TidyError: LocalizedError {
     @Published var journal: String?
     @Published var showingSettings = false
     @Published var onboarding = false
-    @Published var accessibility = false
+    @Published var permissions = PermissionInfo(accessibility: false, screen_recording: false)
+    var accessibility: Bool {
+        get { permissions.accessibility }
+        set { permissions = PermissionInfo(accessibility: newValue, screen_recording: permissions.screen_recording) }
+    }
     @Published var keyConfigured = false
-    var frontmostPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
+    var workFocus = WorkFocus.capture(NSWorkspace.shared.frontmostApplication)
     let config = ProcessInfo.processInfo.environment["FENLET_CONFIG"].map { URL(fileURLWithPath: $0) }
         ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/fenlet/config.json")
     let history = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/state/fenlet/widget-history.json")
@@ -138,7 +180,7 @@ enum TidyError: LocalizedError {
                 if !self.busy && !self.editingDraft && self.draggedWindowID == nil && !self.onboarding && !self.showingSettings {
                     let revision = self.desktopRevision
                     do {
-                        let data = try await Self.command(self.scanArguments, settings: self.settings, frontmostPid: self.frontmostPid)
+                        let data = try await Self.command(self.scanArguments, settings: self.settings, workFocus: self.workFocus)
                         let response = try JSONDecoder().decode(Envelope<InventoryInfo>.self, from: data)
                         if !Task.isCancelled, !self.busy, !self.editingDraft, revision == self.desktopRevision, response.ok, let inventory = response.data {
                             self.liveReadOK = true
@@ -151,6 +193,8 @@ enum TidyError: LocalizedError {
                             self.windowPreviews.refresh(inventory.windows, maxAge: 0.9)
                         } else if !Task.isCancelled { self.liveReadOK = false }
                     } catch { if !Task.isCancelled { self.liveReadOK = false } }
+                } else if self.onboarding || self.showingSettings {
+                    await self.refreshPermission()
                 }
                 do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { return }
             }
@@ -182,7 +226,7 @@ enum TidyError: LocalizedError {
             : screens.contains(where: { $0.bounds.height > $0.bounds.width }) ? 231 : 193
         return 330 + gallery + (draft ? 104 : 0)
     }
-    var panelHeight: CGFloat { Self.panelHeight(for: liveInventory, draft: hasLayout) }
+    var panelHeight: CGFloat { onboarding || showingSettings ? 650 : Self.panelHeight(for: liveInventory, draft: hasLayout) }
     func claimDraftIntroduction(_ id: String) -> Bool { introducedWindows.insert(id).inserted }
     var hasStalePreview: Bool { !hasLayout && preview?.plan.actions.isEmpty == false }
     var hasDraft: Bool { preview?.plan.actions.isEmpty == false }
@@ -260,7 +304,7 @@ enum TidyError: LocalizedError {
     func remember(_ path: String) {
         journal = path
     }
-    static func command(_ args: [String], settings: Settings, input: String? = nil, frontmostPid: pid_t? = nil) async throws -> Data {
+    static func command(_ args: [String], settings: Settings, input: String? = nil, workFocus: WorkFocus? = nil) async throws -> Data {
         let root = Bundle.main.resourceURL!
         return try await Task.detached {
             let p = Process()
@@ -271,7 +315,10 @@ enum TidyError: LocalizedError {
             p.currentDirectoryURL = root
             var env = ProcessInfo.processInfo.environment
             env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:\(NSHomeDirectory())/.bun/bin:" + (env["PATH"] ?? "/usr/bin:/bin")
-            if let pid = frontmostPid { env["FENLET_FRONTMOST_PID"] = String(pid) }
+            if let focus = workFocus {
+                env["FENLET_FRONTMOST_PID"] = String(focus.pid)
+                env["FENLET_FRONTMOST_WINDOW_ID"] = focus.windowID
+            }
             p.environment = env
             let pipe = Pipe()
             p.standardOutput = pipe
@@ -293,10 +340,46 @@ enum TidyError: LocalizedError {
                 let e = try JSONDecoder().decode(Envelope<DoctorInfo>.self, from: d)
                 guard e.ok, let result = e.data else { throw TidyError.message(e.error ?? "Could not check setup.") }
                 accessibility = result.accessibility; keyConfigured = result.key_configured
-                onboarding = !accessibility || !keyConfigured
+                windowPreviews.refreshAuthorization()
+                onboarding = !accessibility || !previewsReady || !keyConfigured
                 if !onboarding { scan(layout: false) }
             } catch { self.error = error.localizedDescription; onboarding = true }
         }
+    }
+    func refreshPermission() async {
+        do {
+            let data = try await Self.command(["doctor", "--permissions-only"], settings: settings)
+            let response = try JSONDecoder().decode(Envelope<PermissionInfo>.self, from: data)
+            guard !Task.isCancelled else { return }
+            guard response.ok, let result = response.data else { throw TidyError.message(response.error ?? "Could not check window control.") }
+            if updatePermissions(result) {
+                error = nil; scan(layout: false)
+            }
+        } catch { if !Task.isCancelled { self.error = error.localizedDescription } }
+    }
+    @discardableResult func updatePermissions(_ result: PermissionInfo) -> Bool {
+        permissions = result
+        windowPreviews.refreshAuthorization()
+        let wasOnboarding = onboarding
+        onboarding = !accessibility || !previewsReady || !keyConfigured
+        return wasOnboarding && !onboarding
+    }
+    var previewRestartNeeded: Bool { permissions.screen_recording && !windowPreviews.allowed }
+    var previewsReady: Bool { !windowPreviews.supported || windowPreviews.allowed || settings.skipWindowPreviews == true }
+    func skipPreviews() {
+        settings.skipWindowPreviews = true
+        do { try persist(); checkSetup() } catch { self.error = error.localizedDescription }
+    }
+    func allowWindowControl() {
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
+        _ = AXIsProcessTrustedWithOptions(options as CFDictionary)
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+    }
+    func restart() {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/sh")
+        task.arguments = ["-c", "sleep 1; /usr/bin/open -n \"$1\" --args --show", "fenlet-restart", Bundle.main.bundlePath]
+        do { try task.run(); NSApp.terminate(nil) } catch { self.error = error.localizedDescription }
     }
     func saveKey(_ key: String) async throws {
         let d = try await Self.command(["setup", "--provider", settings.provider, "--key-stdin"], settings: settings, input: key)
@@ -313,7 +396,7 @@ enum TidyError: LocalizedError {
         Task {
             defer { busy = false }
             do {
-                let data = try await Self.command(layout ? layoutArguments("plan") : scanArguments, settings: settings, frontmostPid: frontmostPid)
+                let data = try await Self.command(layout ? layoutArguments("plan") : scanArguments, settings: settings, workFocus: workFocus)
                 guard revision == desktopRevision else { status = "Ready to arrange."; return }
                 let inventory: InventoryInfo
                 if layout {
@@ -341,6 +424,7 @@ enum TidyError: LocalizedError {
             + (gather.map { ["--display", $0.id] } ?? [])
     }
     func complete(_ result: ApplyInfo, from before: PreviewInfo, elapsed: Int) {
+        presentation = .live(nil)
         if result.undoable { remember(result.journal_path) }
         if let check = result.layout_check {
             preview = before.showing(check)
@@ -350,7 +434,12 @@ enum TidyError: LocalizedError {
         status = "\(result.arranged) arranged · \(result.minimized) minimized · \(result.closed) closed · \(String(format: "%.1fs", Double(elapsed) / 1000))"
         if result.arranged + result.minimized + result.closed == 0, result.failed == 0 { status = "Already arranged. · \(String(format: "%.1fs", Double(elapsed) / 1000))" }
         if !before.coverage.errors.isEmpty { status += " Some windows couldn't be inspected." }
-        if result.failed > 0 { error = "\(result.failed) windows couldn’t be changed. Refresh to review them." }
+        if result.failed > 0 {
+            let failures = zip(before.plan.actions, result.results ?? []).filter { !$0.1.ok }
+            if let first = failures.first {
+                error = "\(first.0.window.app_name): \(first.1.error ?? "Couldn’t apply this change.") Refresh to review."
+            } else { error = result.failed == 1 ? "One window couldn’t be changed. Refresh to review." : "\(result.failed) windows couldn’t be changed. Refresh to review." }
+        }
         if let check = result.layout_check, check.overlap_count > 0 { error = "\(check.overlap_count) overlapping pairs remain. Refresh to review." }
     }
     func editDraft(_ arguments: [String]) {
@@ -393,7 +482,7 @@ enum TidyError: LocalizedError {
                 let response = try JSONDecoder().decode(Envelope<ApplyInfo>.self, from: data)
                 guard response.ok, let result = response.data else { throw TidyError.message(response.error ?? "Could not apply this layout.") }
                 complete(result, from: preview, elapsed: result.apply_ms)
-            } catch { self.error = error.localizedDescription; status = "Refresh your preview to continue." }
+            } catch { self.error = error.localizedDescription; status = "Refresh your preview to continue."; hasLayout = false }
         }
     }
     func undo() {
@@ -609,16 +698,8 @@ struct DisplayGallery: View {
                     }
                     .padding(.trailing, inventory.displays.count > 2 ? 8 : 0)
                 }.scrollIndicators(inventory.displays.count > 2 ? .visible : .hidden)
-                if !captures.allowed && captures.supported {
-                    HStack {
-                        Text("Allow Screen Recording for window previews.").font(.system(size: 10)).foregroundStyle(.secondary)
-                        Spacer()
-                        Button("Allow…") { captures.enable(); captures.refresh(inventory.windows) }.controlSize(.small)
-                    }
-                } else {
-                    Text(store.hasLayout ? "Drag a window to swap, move, or keep it visible" : "Hover a window for a closer look")
-                        .font(.system(size: 10)).foregroundStyle(.tertiary)
-                }
+                Text(store.hasLayout ? "Drag a window to swap, move, or keep it visible" : "Hover a window for a closer look")
+                    .font(.system(size: 10)).foregroundStyle(.tertiary)
             }.frame(maxHeight: .infinity, alignment: .top)
         } else {
             HStack(spacing: 10) { ProgressView().controlSize(.small); Text("Reading your windows…").font(.system(size: 12)).foregroundStyle(.secondary) }
@@ -750,6 +831,63 @@ struct DisplayPreferences: View {
     }
 }
 
+struct PermissionSetup: View {
+    @ObservedObject var store: Store
+    @ObservedObject var captures: WindowPreviews
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if store.onboarding {
+                Text("A little setup. A lot more room.").font(.system(size: 20, weight: .semibold))
+                Text("Allow these two things once. Fenlet will notice when you’re ready.")
+                    .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            permissionCard(title: "Control your windows", icon: "rectangle.on.rectangle", allowed: store.accessibility,
+                detail: "Move, resize, and minimize windows. Nothing changes until you confirm.",
+                button: "Allow window control", action: store.allowWindowControl)
+            if captures.supported {
+                permissionCard(title: "See your window previews", icon: "macwindow", allowed: captures.allowed,
+                    detail: "Screen Recording lets you see real windows as you arrange them. Previews stay on your Mac.",
+                    button: store.previewRestartNeeded ? "Restart Fenlet for previews" : "Allow window previews", action: {
+                        if store.previewRestartNeeded { store.restart(); return }
+                        store.settings.skipWindowPreviews = false
+                        try? store.persist()
+                        captures.enable()
+                    })
+                if !captures.allowed {
+                    Text(store.previewRestartNeeded ? "Permission is on. Restart Fenlet to finish setting up previews." : "Turn on Fenlet in Screen & System Audio Recording. Choose Quit & Reopen if macOS asks.")
+                        .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    HStack {
+                        Button("Already enabled? Restart Fenlet", action: store.restart)
+                        Spacer()
+                        Button("Skip previews", action: store.skipPreviews)
+                    }.buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(.secondary).frame(minHeight: 40)
+                }
+            }
+            if store.onboarding {
+                Label("Everything is included. No other tools to install.", systemImage: "checkmark.circle")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+        }
+    }
+    private func permissionCard(title: String, icon: String, allowed: Bool, detail: String, button: String, action: @escaping () -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                Image(systemName: allowed ? "checkmark.circle.fill" : icon)
+                    .font(.system(size: 20)).foregroundStyle(allowed ? Color.green : .accentColor).frame(width: 26)
+                Text(title).font(.system(size: 13, weight: .semibold))
+                Spacer()
+                if allowed { Text("Allowed").font(.system(size: 11, weight: .medium)).foregroundStyle(.green) }
+            }
+            if !allowed {
+                Text(detail).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Button(action: action) { Text(button).frame(maxWidth: .infinity, minHeight: 40) }
+                    .buttonStyle(.borderedProminent).controlSize(.large)
+            }
+        }.padding(14).frame(maxWidth: .infinity, alignment: .leading)
+            .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 16))
+    }
+}
+
 struct SettingsPanel: View {
     @ObservedObject var store: Store
     @State private var apiKey = ""
@@ -757,25 +895,15 @@ struct SettingsPanel: View {
     @State private var cliInstalled = false
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
+            if store.onboarding && (!store.accessibility || !store.previewsReady) {
+                PermissionSetup(store: store, captures: store.windowPreviews)
+            } else {
             if store.onboarding {
-                Text("A quick setup, then more room to work.").font(.system(size: 13)).foregroundStyle(.secondary)
+                Text("Connect your planner").font(.system(size: 20, weight: .semibold))
+                Text("Your Mac is ready. Add a key to plan your first layout.").font(.system(size: 12)).foregroundStyle(.secondary)
+            } else {
+                PermissionSetup(store: store, captures: store.windowPreviews)
             }
-            VStack(alignment: .leading, spacing: 12) {
-                Label("Everything included", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
-                Text("No Homebrew, Python, or browser tools to install.").font(.system(size: 11)).foregroundStyle(.secondary)
-                HStack {
-                    Label(store.accessibility ? "Window control allowed" : "Allow window control", systemImage: store.accessibility ? "checkmark.circle.fill" : "rectangle.on.rectangle")
-                    Spacer()
-                    if !store.accessibility {
-                        Button("Allow…") {
-                            let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
-                            _ = AXIsProcessTrustedWithOptions(options as CFDictionary)
-                            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
-                        }.controlSize(.small)
-                    }
-                }
-                if !store.accessibility { Text("Enable Fenlet in Accessibility, then check again below.").font(.system(size: 11)).foregroundStyle(.secondary) }
-            }.padding(12).background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
             if !store.onboarding { DisplayPreferences(store: store) }
             VStack(alignment: .leading, spacing: 10) {
                 Picker("Provider", selection: $store.settings.provider) {
@@ -821,6 +949,7 @@ struct SettingsPanel: View {
             } label: {
                 Text(saving ? "Connecting…" : store.onboarding ? "Save & check setup" : "Done").frame(maxWidth: .infinity, minHeight: 26)
             }.buttonStyle(.borderedProminent).controlSize(.large).disabled(saving)
+            }
             if let error = store.error { Text(error).font(.system(size: 11)).foregroundStyle(.orange) }
             if store.onboarding { Button("Quit Fenlet") { NSApp.terminate(nil) }.buttonStyle(.plain).font(.system(size: 10)).foregroundStyle(.secondary) }
         }.font(.system(size: 12))
@@ -833,8 +962,14 @@ struct SettingsPanel: View {
     let popover = NSPopover()
     var previewWindow: NSWindow?
     private var sizeWatcher: AnyCancellable?
+    private var focusObserver: NSObjectProtocol?
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        focusObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] event in
+            MainActor.assumeIsolated {
+                if let focus = WorkFocus.capture(event.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication) { self?.store.workFocus = focus }
+            }
+        }
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = item.button {
             let icon = FenletBrand.mark(size: 20, template: true)
@@ -857,8 +992,10 @@ struct SettingsPanel: View {
             previewWindow = window; NSApp.activate(ignoringOtherApps: true)
             store.startPreviewUpdates()
         }
-        sizeWatcher = store.$liveInventory.combineLatest(store.$hasLayout).map { Store.panelHeight(for: $0.0, draft: $0.1) }.removeDuplicates().sink { [weak self] height in
+        sizeWatcher = store.objectWillChange.debounce(for: .milliseconds(10), scheduler: RunLoop.main).sink { [weak self] _ in
             guard let self else { return }
+            let height = self.store.panelHeight
+            guard abs(self.popover.contentSize.height - height) > 0.5 || self.previewWindow.map({ abs($0.contentLayoutRect.height - height) > 0.5 }) == true else { return }
             self.popover.contentSize = NSSize(width: 420, height: height)
             if let window = self.previewWindow {
                 let top = window.frame.maxY
@@ -885,7 +1022,8 @@ struct SettingsPanel: View {
     @objc func toggle() {
         if popover.isShown { popover.performClose(nil) }
         else if let button = item.button {
-            if let app = NSWorkspace.shared.frontmostApplication, app.processIdentifier != ProcessInfo.processInfo.processIdentifier { store.frontmostPid = app.processIdentifier }
+            if let focus = WorkFocus.capture(NSWorkspace.shared.frontmostApplication) { store.workFocus = focus }
+            NSApp.activate(ignoringOtherApps: true)
             popover.contentViewController?.view.layoutSubtreeIfNeeded()
             if let size = popover.contentViewController?.view.fittingSize, size.height > 0 { popover.contentSize = size }
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)

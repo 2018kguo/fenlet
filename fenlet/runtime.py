@@ -257,11 +257,14 @@ def inventory(*, all_spaces=False):
     for w in candidates:
         learned = constraints.get(w["process_instance"] + "/" + w["id"])
         if learned:
-            w["min_size"] = learned
+            # An observed smaller frame disproves an older learned clamp.
+            w["min_size"] = {axis: min(learned[axis], w["bounds"][axis]) for axis in ("width", "height")}
     # Opening the popover should not make the user's underlying work lose priority.
     prior_pid = os.environ.get("FENLET_FRONTMOST_PID")
-    prior_windows = [w for w in windows if str(w["pid"]) == prior_pid and not w.get("minimized")]
-    if prior_windows and not any(w.get("is_focused") for w in windows):
+    prior_id = os.environ.get("FENLET_FRONTMOST_WINDOW_ID")
+    prior_windows = [w for w in windows if str(w["pid"]) == prior_pid and not w.get("minimized")
+                     and (prior_id is None or w["id"] == prior_id)]
+    if prior_windows and not any(w.get("is_focused") for w in candidates):
         prior_windows[0]["is_focused"] = True
     return {"created_at": time.time(), "displays": displays, "windows": windows, "all_spaces": all_spaces,
             "coverage": observed["coverage"],

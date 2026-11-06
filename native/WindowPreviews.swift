@@ -87,6 +87,7 @@ import SwiftUI
             (window.id, Thumbnail(identity: Self.identity(window), image: DemoWindows.image(for: window)))
         })
     }
+    func loadPermissionFixture(allowed: Bool) { fixtureMode = true; self.allowed = allowed }
     #endif
 
     nonisolated static func identity(_ window: WindowInfo) -> String {
@@ -97,6 +98,12 @@ import SwiftUI
         return thumbnail.image
     }
     var supported: Bool { if #available(macOS 14.0, *) { return true }; return false }
+    func refreshAuthorization() {
+        #if FENLET_UI_TEST
+        if fixtureMode { return }
+        #endif
+        allowed = CGPreflightScreenCaptureAccess()
+    }
     func enable() {
         if CGRequestScreenCaptureAccess() { allowed = true }
         else { NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!) }

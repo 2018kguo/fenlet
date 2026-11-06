@@ -16,6 +16,42 @@ import SwiftUI
             store.settings.gatherScreen = preview.plan.inventory.displays.first?.id
         }
         store.preview = preview; store.hasLayout = true; store.liveReadOK = true
+        if CommandLine.arguments.contains("--verify-state") {
+            let failure = ApplyInfo(journal_path: "synthetic", succeeded: 0, failed: 1, planned: 1, apply_ms: 12,
+                closed: 0, arranged: 0, minimized: 0, undoable: false,
+                layout_check: .init(overlap_count: 0, windows: preview.plan.inventory.windows, displays: preview.plan.inventory.displays),
+                results: [.init(ok: false, error: "Window changed since preview.")])
+            store.complete(failure, from: preview, elapsed: 12)
+            precondition(!store.hasLayout && !store.hasDraft, "An applied plan stayed confirmable.")
+            precondition(store.error?.contains(preview.plan.actions[0].window.app_name) == true, "Failure did not identify its app.")
+            store.onboarding = true; store.keyConfigured = true
+            store.windowPreviews.loadPermissionFixture(allowed: false)
+            store.updatePermissions(.init(accessibility: true, screen_recording: false))
+            precondition(store.onboarding && store.accessibility, "Setup skipped window previews.")
+            store.updatePermissions(.init(accessibility: true, screen_recording: true))
+            precondition(store.previewRestartNeeded && store.onboarding, "A restart requirement was hidden.")
+            store.windowPreviews.loadPermissionFixture(allowed: true)
+            precondition(store.updatePermissions(.init(accessibility: true, screen_recording: true)), "New grants did not finish setup.")
+            precondition(!store.onboarding)
+            store.error = nil; store.preview = preview; store.hasLayout = true
+        }
+        if CommandLine.arguments.contains("--onboarding") {
+            store.onboarding = true; store.accessibility = false; store.keyConfigured = true
+            store.windowPreviews.loadPermissionFixture(allowed: false)
+            if let index = CommandLine.arguments.firstIndex(of: "--permission-file"), index + 1 < CommandLine.arguments.count {
+                let permissionFile = URL(fileURLWithPath: CommandLine.arguments[index + 1])
+                var previous: Data?
+                Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
+                    MainActor.assumeIsolated {
+                        guard let data = try? Data(contentsOf: permissionFile), data != previous,
+                              let info = try? JSONDecoder().decode(PermissionInfo.self, from: data) else { return }
+                        previous = data
+                        store.windowPreviews.loadPermissionFixture(allowed: info.screen_recording)
+                        store.updatePermissions(info)
+                    }
+                }
+            }
+        }
         let demo = CommandLine.arguments.contains("--demo") || CommandLine.arguments.contains("--demo-live")
         if demo {
             store.windowPreviews.loadDemo(preview.plan.inventory.windows)

@@ -690,7 +690,7 @@ func inventoryData(entries: [[String: Any]], focus: [String: Any], allSpaces: Bo
         let focused = focusedID.isEmpty ? frontmost == pid && !focusedFound : focusedID == "w-\(id)"
         if focused { focusedFound = true }
         let title = entry[kCGWindowName as String] as? String ?? name
-        var row: [String: Any] = ["id": "w-\(id)", "app_name": name, "title": title, "pid": pid,
+        var row: [String: Any] = ["id": "w-\(id)", "app_name": name, "bundle_id": app.bundleIdentifier ?? "", "title": title, "pid": pid,
             "title_source": entry[kCGWindowName as String] is String ? "cg" : "app",
             "process_instance": "macos-proc-v1:\(process.pbi_start_tvsec):\(process.pbi_start_tvusec)",
             "bounds": ["x": frame.minX, "y": frame.minY, "width": frame.width, "height": frame.height],
@@ -752,7 +752,7 @@ func nativeCommand(_ command: String, payload: Data? = nil) -> Bool {
     case "inventory":
         let options = payload.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
         inventory(allSpaces: options?["all_spaces"] as? Bool ?? false)
-    case "permissions": output(["ok": true, "data": ["accessibility": AXIsProcessTrusted()]])
+    case "permissions": output(["ok": true, "data": ["accessibility": AXIsProcessTrusted(), "screen_recording": CGPreflightScreenCaptureAccess()]])
     case "focus": output(["ok": true, "data": currentFocus()])
     case "windows":
         do { batchWindows(try JSONDecoder().decode(BatchRequest.self, from: payload ?? FileHandle.standardInput.readDataToEndOfFile())) }

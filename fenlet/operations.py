@@ -106,7 +106,7 @@ def window_matches(action, live):
         return False
     if action["kind"] == "close":
         return live is None
-    if action["kind"] == "move" and live and live.get("resizable") is False:
+    if action["kind"] == "move" and live:
         b, t = live["bounds"], action["target"]
         return (not live.get("minimized") and abs(b["x"] - t["x"]) <= 2 and abs(b["y"] - t["y"]) <= 2
                 and b["width"] <= t["width"] + 1 and b["height"] <= t["height"] + 1)

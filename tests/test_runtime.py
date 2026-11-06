@@ -12,6 +12,21 @@ from fenlet.core import build_actions
 from tests.test_core import inventory, window
 
 
+class InventoryContextTest(unittest.TestCase):
+    def test_work_focus_uses_exact_window_and_disproved_constraints_are_discarded(self):
+        from fenlet.runtime import inventory as scan
+        work = {**window("work", "Google Chrome"), "min_size": dict(width=500, height=320)}
+        chat = window("chat", "Google Chrome")
+        widget = {**window("widget", "Fenlet", focused=True), "pid": 999}
+        observed = {**inventory([chat, work, widget]), "coverage": {"complete": True, "errors": []}}
+        with tempfile.TemporaryDirectory() as d, patch("fenlet.runtime.STATE", Path(d)), patch("fenlet.runtime.native_json", return_value=observed), patch.dict("os.environ", {"FENLET_FRONTMOST_PID": "100", "FENLET_FRONTMOST_WINDOW_ID": "work"}):
+            (Path(d)/"window-constraints.json").write_text(json.dumps({"proc-100/work": dict(width=900, height=893)}))
+            result = scan()
+        self.assertTrue(next(w for w in result["windows"] if w["id"] == "work")["is_focused"])
+        self.assertFalse(next(w for w in result["windows"] if w["id"] == "chat")["is_focused"])
+        self.assertEqual(work["min_size"], dict(width=800, height=600))
+
+
 class DecisionCacheTest(unittest.TestCase):
     def test_confirmed_layout_overrides_cached_classification_until_the_window_changes(self):
         inv = {**inventory([window(focused=True), window("w-2", "Safari"), window("w-3", "Notes")]),
