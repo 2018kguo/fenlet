@@ -20,7 +20,11 @@ version in `fenlet/__init__.py` supplies the CLI and app version. A prebuilt
 app needs no external runtime. GitHub Actions checks Python 3.11 and 3.14 on
 Linux, then builds and tests the ARM64 app on macOS 15.
 
-On a Mac with Accessibility permission:
+The following native and widget checks open temporary windows and can switch
+Spaces or focus. Run them in a dedicated desktop test session. Ask before using
+someone's active desktop; the unit tests and build above do not open windows.
+
+On a test Mac with Accessibility permission:
 
 ```sh
 python3 scripts/verify-native.py
