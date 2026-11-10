@@ -26,8 +26,10 @@ def main():
         info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
         version = subprocess.check_output([str(cli), "--version"], env=env, cwd=directory, text=True).strip()
         assert version == "fenlet " + info["CFBundleShortVersionString"], version
-        for relative in ("LICENSE.txt", "THIRD_PARTY_NOTICES.md", "python-licenses/manifest.json", "runtime/lib/python3.14/LICENSE.txt"):
+        for relative in ("LICENSE.txt", "THIRD_PARTY_NOTICES.md", "Sparkle-LICENSE.txt", "python-licenses/manifest.json", "runtime/lib/python3.14/LICENSE.txt"):
             assert (resources / relative).is_file(), relative
+        assert (app / "Contents/Frameworks/Sparkle.framework/Sparkle").is_file()
+        assert info["SUFeedURL"].startswith("https://") and len(info["SUPublicEDKey"]) == 44
         doctor = json.loads(subprocess.check_output([str(cli), "doctor"], env=env, cwd=directory, text=True))
         assert doctor["ok"] and doctor["data"]["runtime_ready"], doctor
         # A clean user's permission/key state is allowed to be false. Never prompt.
@@ -37,7 +39,7 @@ def main():
         assert (home / ".codex/skills/fenlet").resolve() == (resources / "skills/fenlet").resolve()
         assert subprocess.check_output([str(home / ".local/bin/fenlet"), "--version"], env=env, text=True).strip() == version
     print(json.dumps({"version": version, "signature_valid": True, "relocatable": True,
-                      "empty_home_setup": True, "bundled_runtime": True, "license_notices": True}))
+                      "empty_home_setup": True, "bundled_runtime": True, "signed_updater": True, "license_notices": True}))
 
 
 if __name__ == "__main__":

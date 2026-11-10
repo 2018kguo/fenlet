@@ -13,7 +13,7 @@ import atexit
 import select
 import threading
 
-from .core import model_state, validate_decisions, available_roles, eligible_windows, same_bounds, same_space_state
+from .core import model_state, validate_decisions, available_roles, eligible_windows, same_bounds, same_space_state, local_decisions
 from .questions import ESCALATE_BELOW_PROBABILITY, placements, jev_payload
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -290,12 +290,12 @@ def load_env(path):
         os.environ.setdefault(key, value)
 
 
-def request_json(url, payload, key):
+def request_json(url, payload, key, timeout=35):
     import urllib.request
     req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers={
         "Authorization": f"Bearer {key}", "Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=35) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.load(r)
     except urllib.error.HTTPError as e:
         # Error bodies may echo private state. Report status only.
@@ -340,9 +340,9 @@ def verified_layout_roles(inv, intent):
         return {}
 
 
-def decide(inv, intent, model="jev", provider="gateway", *, use_cache=False):
+def decide(inv, intent, model="jev", provider="gateway", *, use_cache=False, request_timeout=35):
     if not use_cache:
-        return request_decisions(inv, intent, model, provider)
+        return request_decisions(inv, intent, model, provider, request_timeout=request_timeout)
     retained = verified_layout_roles(inv, intent)
     def reviewed(decisions):
         return [{**d, "role": retained.get(d["id"], d["role"])} for d in decisions]
@@ -362,7 +362,7 @@ def decide(inv, intent, model="jev", provider="gateway", *, use_cache=False):
             return reviewed(cached["decisions"]), {"model": MODELS[model], "provider": provider, "latency_ms": 0, "cost": 0, "cache_hit": True}
     except (OSError, ValueError, KeyError, TypeError):
         pass
-    decisions, metadata = request_decisions(inv, intent, model, provider)
+    decisions, metadata = request_decisions(inv, intent, model, provider, request_timeout=request_timeout)
     replace_private_json(path, {"created_at": time.time(), "decisions": decisions})
     owned = [p for p in path.parent.glob("*.json") if len(p.stem) == 64 and all(c in "0123456789abcdef" for c in p.stem)]
     for old in sorted(owned, key=lambda p: p.stat().st_mtime, reverse=True)[64:]:
@@ -370,7 +370,20 @@ def decide(inv, intent, model="jev", provider="gateway", *, use_cache=False):
     return reviewed(decisions), {**metadata, "cache_hit": False}
 
 
-def request_decisions(inv, intent, model="jev", provider="gateway"):
+def automatic_decisions(inv, intent, preferred_model="jev", provider="gateway", *, local_only=False):
+    notice = "Prepared on your Mac. Drag tiles to customize; written instructions require optional AI."
+    if not local_only:
+        try:
+            if provider_key(provider):
+                return decide(inv, intent, preferred_model, provider, use_cache=True, request_timeout=4)
+        except (RuntimeError, OSError, TimeoutError, ValueError, KeyError, TypeError):
+            notice = "AI is unavailable. This layout was prepared on your Mac."
+    retained = verified_layout_roles(inv, intent)
+    decisions = [{**d, "role": retained.get(d["id"], d["role"])} for d in local_decisions(inv)]
+    return decisions, {"model": "Local", "provider": "local", "latency_ms": 0, "cost": 0, "notice": notice}
+
+
+def request_decisions(inv, intent, model="jev", provider="gateway", *, request_timeout=35):
     state = model_state(inv, intent)
     options = placements(inv)
     state["placements"] = options
@@ -391,7 +404,7 @@ def request_decisions(inv, intent, model="jev", provider="gateway"):
             raise ValueError("Jev uses Gateway's Decisions API. Choose --provider gateway.")
         # Structured per-question subjects avoid looking up opaque IDs in a large state.
         payload = jev_payload(windows, intent, options)
-        response = request_json("https://ai-gateway.vercel.sh/typesafe/v1/systemone", payload, key)
+        response = request_json("https://ai-gateway.vercel.sh/typesafe/v1/systemone", payload, key, timeout=request_timeout)
         answers = response["answers"]
         if set(answers) != {w["id"] for w in windows}:
             raise ValueError("Jev returned missing or extra answers. No changes were made.")
@@ -413,7 +426,7 @@ def request_decisions(inv, intent, model="jev", provider="gateway"):
             uncertain = {id for id, p in probabilities.items() if p < ESCALATE_BELOW_PROBABILITY}
             if uncertain:
                 subset = {**inv, "windows": [w for w in inv["windows"] if w["id"] in uncertain]}
-                replacements, fallback = decide(subset, intent, "nemotron", provider)
+                replacements, fallback = decide(subset, intent, "nemotron", provider, request_timeout=request_timeout)
                 chosen = {d["id"]: d for d in replacements}
                 decisions = [chosen.get(d["id"], d) for d in decisions]
     else:
@@ -427,7 +440,7 @@ def request_decisions(inv, intent, model="jev", provider="gateway"):
             "response_format": {"type": "json_schema", "json_schema": {
                 "name": "desktop_assignments", "strict": True, "schema": schema}},
             "reasoning": {"enabled": False}}
-        response = request_json(base + "/chat/completions", payload, key)
+        response = request_json(base + "/chat/completions", payload, key, timeout=request_timeout)
         parsed = json.loads(response["choices"][0]["message"]["content"])
         if not isinstance(parsed, dict) or "assignments" not in parsed:
             raise ValueError("Model returned an invalid assignment object. No changes were made; choose Jev or preview again.")

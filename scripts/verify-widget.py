@@ -19,7 +19,7 @@ from fenlet.core import build_actions
 
 def build_fixture(executable):
     subprocess.run(["xcrun", "swiftc", "-O", "-D", "FENLET_UI_TEST", "-parse-as-library",
-                    *[str(ROOT / "native" / file) for file in ("MenuBar.swift", "WindowPreviews.swift", "DraftEditing.swift", "Brand.swift", "DemoWindows.swift", "WidgetFixture.swift")],
+                    *[str(ROOT / "native" / file) for file in ("Engine.swift", "Updater.swift", "MenuBar.swift", "WindowPreviews.swift", "DraftEditing.swift", "Brand.swift", "DemoWindows.swift", "WidgetFixture.swift")],
                     "-o", str(executable), "-framework", "SwiftUI", "-framework", "Security", "-framework", "ScreenCaptureKit"], check=True)
 
 

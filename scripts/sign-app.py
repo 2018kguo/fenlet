@@ -18,7 +18,8 @@ def main():
         if path.is_file() and not path.is_symlink():
             with path.open("rb") as source:
                 if source.read(4) in magic: images.append(path)
-    for path in sorted(images, key=lambda p: len(p.parts), reverse=True) + [app]:
+    bundles = [p for p in app.rglob("*") if p.is_dir() and not p.is_symlink() and p.suffix in (".xpc", ".app", ".framework")]
+    for path in sorted(images + bundles, key=lambda p: len(p.parts), reverse=True) + [app]:
         subprocess.run(["codesign", "--force", "--options", "runtime", "--timestamp", "--sign", args.identity, str(path)],
                        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)], check=True)

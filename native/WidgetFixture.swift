@@ -20,7 +20,7 @@ import SwiftUI
             store.windowPreviews.loadDemo(preview.plan.inventory.windows)
             store.error = "An old display error"
             store.observeInventory(InventoryInfo(displays: [], windows: preview.plan.inventory.windows))
-            precondition(!store.hasLayout && store.availableDisplays.isEmpty && store.error == nil, "A changed display setup retained the old draft or error.")
+            precondition(store.hasLayout && store.preview?.plan_path == preview.plan_path && store.availableDisplays.isEmpty && store.error == nil, "A live observation discarded reviewed draft edits.")
             store.liveInventory = preview.plan.inventory; store.preview = preview; store.hasLayout = true
             let failure = ApplyInfo(journal_path: "synthetic", succeeded: 0, failed: 1, planned: 1, apply_ms: 12,
                 closed: 0, arranged: 0, minimized: 0, undoable: false,
@@ -29,7 +29,7 @@ import SwiftUI
             store.complete(failure, from: preview, elapsed: 12)
             precondition(!store.hasLayout && !store.hasDraft, "An applied plan stayed confirmable.")
             precondition(store.error?.contains(preview.plan.actions[0].window.app_name) == true, "Failure did not identify its app.")
-            store.onboarding = true; store.keyConfigured = true
+            store.onboarding = true; store.keyConfigured = false
             store.windowPreviews.loadPermissionFixture(allowed: false)
             store.updatePermissions(.init(accessibility: true, screen_recording: false))
             precondition(store.onboarding && store.accessibility, "Setup skipped window previews.")

@@ -8,7 +8,7 @@ import time
 import uuid
 from dataclasses import dataclass
 
-from .core import build_actions, same_bounds, same_space_state, valid_bounds, fits_tile, frames_overlap, eligible_windows, constrained_tiles, layout_report, revise_actions
+from .core import build_actions, same_bounds, same_space_state, valid_bounds, fits_tile, frames_overlap, eligible_windows, constrained_tiles, layout_report, revise_actions, reconcile_actions
 from .runtime import STATE, native_window_batch, private_dir, write_json, replace_private_json, native_json
 from .overlap import analyze_overlaps
 
@@ -57,6 +57,29 @@ def revise_plan(path, operation, window_id, target=None):
     new_path, plan = save_plan(before["inventory"], None, before["intent"], before["model"], actions=actions)
     read_plan(new_path)
     return summary(plan, new_path)
+
+
+def reconcile_plan(path, inv):
+    before = read_plan(path)
+    # An incomplete scan cannot establish that a reviewed window disappeared.
+    live = {w["id"]: w for w in inv["windows"]}
+    missing = {a["window"]["id"]: a["window"] for a in before["actions"] if a["window"]["id"] not in live}
+    if missing and not inv["coverage"]["complete"]:
+        observed = native_window_batch([{"kind": "metadata", "window": w} for w in missing.values()])
+        unresolved = [w for id, w in missing.items() if not observed.results[id].get("closed")]
+        inv = {**inv, "windows": inv["windows"] + unresolved}
+    def state(value):
+        return ({s["id"]: s for s in value["displays"]}, {w["id"]: tuple(json.dumps(w.get(k), sort_keys=True) for k in
+            ("pid", "process_instance", "bounds", "minimized", "space_ids", "fullscreen", "is_focused")) for w in value["windows"]})
+    close_changed = any(a["kind"] == "close" and a["window"]["id"] in live
+        and live[a["window"]["id"]].get("title") != a["window"].get("title") for a in before["actions"])
+    expired = not 0 <= time.time() - before["inventory"]["created_at"] <= 900
+    if state(before["inventory"]) == state(inv) and not close_changed and not expired:
+        return {"inventory": inv, "preview": summary(before, Path(path)), "changed": False}
+    actions = reconcile_actions(before, inv)
+    new_path, plan = save_plan(inv, None, before["intent"], before["model"], actions=actions)
+    read_plan(new_path)
+    return {"inventory": inv, "preview": summary(plan, new_path), "changed": True}
 
 
 @contextmanager

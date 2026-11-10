@@ -27,8 +27,9 @@ connect or disconnect a monitor. There’s no mode or destination to select.
 [Releases & checksums](https://github.com/2018kguo/fenlet/releases)
 
 Unzip it, move **Fenlet.app** into Applications, and open it. Setup guides you
-through Accessibility permission, your provider key, and optional window
-previews. Choose **Install CLI & skill** in Settings for terminal and agent use.
+through window-control and preview permissions. Basic layouts work locally;
+an optional AI key lets Fenlet interpret written instructions. Choose
+**Install CLI & skill** in Settings for terminal and agent use.
 
 macOS 13+; real window thumbnails need macOS 14+ and Screen Recording permission.
 The app includes its runtime. No Homebrew, Python install, browser extension,
@@ -43,8 +44,12 @@ To build from source:
 git clone https://github.com/2018kguo/fenlet.git
 cd fenlet
 bash scripts/install.sh
-open "$HOME/Applications/Fenlet.app"
+open -a Fenlet
 ```
+
+The installer reuses the existing app location and keeps rollback as a ZIP.
+It refuses to replace a Developer ID signed app with an unsigned source build.
+Use `FENLET_SIGN_IDENTITY` to retain your own signing identity.
 
 The source build needs Apple's Command Line Tools; the installer opens Apple's
 setup when they are missing. The [development guide](docs/development.md)
@@ -122,7 +127,7 @@ Accessibility and CoreGraphics for OS control. No Electron or Python packages.
 ```sh
 python3 -m unittest discover -v
 bash scripts/build-app.sh
-python3 scripts/verify-bundle.py build/Fenlet.app
+python3 scripts/verify-bundle.py build/development.noindex/Fenlet.app
 ```
 
 CI runs the planner tests on Linux and builds and smoke-tests the portable app

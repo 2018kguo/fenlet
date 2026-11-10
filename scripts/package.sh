@@ -5,7 +5,7 @@ if [ "$#" -gt 0 ]; then
   TASK_APP="$1"
 else
   bash "$TASK_ROOT/scripts/build-app.sh"
-  TASK_APP="$TASK_ROOT/build/Fenlet.app"
+  TASK_APP="$TASK_ROOT/build/development.noindex/Fenlet.app"
 fi
 codesign --verify --deep --strict "$TASK_APP"
 TASK_ZIP="$TASK_ROOT/build/Fenlet-macos-$(uname -m).zip"

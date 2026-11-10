@@ -122,7 +122,7 @@ def verify_spaces(fixture, references, directory):
         journal.write_text("".join(json.dumps(e)+"\n" for e in entries))
         with patch("fenlet.operations.STATE", directory / "state"):
             undone = operations.undo(journal)
-            assert undone["restored"] == 3 and not undone["skipped"], {"summary": undone, "observations": [json.loads(line) for line in journal.read_text().splitlines() if json.loads(line)["event"] == "undo_observed"]}
+            assert undone["restored"] == 3 and not undone["skipped"], {"summary": undone, "originals": [{k: w.get(k) for k in ("id", "pid", "space_ids", "fullscreen")} for w in originals], "observations": [json.loads(line) for line in journal.read_text().splitlines() if json.loads(line)["event"] == "undo_observed"]}
             assert operations.undo(journal)["restored"] == 0
         return {"all_spaces_close_verified": True, "three_spaces_gathered": True, "gather_ms": elapsed, "overlaps": 0,
                 "stale_space_and_fullscreen_guard": True, "fullscreen_and_frame_undo": True}

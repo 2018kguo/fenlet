@@ -19,8 +19,10 @@ Open Fenlet's menu-bar icon. Setup guides you through:
    in Screen & System Audio Recording. If macOS asks, choose Quit & Reopen.
    Fenlet shows a restart button when a grant needs a fresh process. You can
    explicitly skip previews and arrange using app names instead.
-3. **A provider key**, saved in your Keychain. Vercel AI Gateway supports all
-   model choices; OpenRouter supports Nemotron and Beam.
+3. **Optional AI assistance**, configured in Settings with a provider key saved
+   in Keychain. Basic layouts need no key or connection. Written instructions
+   use AI; drag edits always work locally. Vercel AI Gateway supports all model
+   choices; OpenRouter supports Nemotron and Beam.
 
 If Accessibility already shows Fenlet enabled but setup still reports it
 blocked, remove that Fenlet entry and add the installed copy again. A grant
@@ -92,7 +94,7 @@ python3 scripts/benchmark.py --repeats 2
 
 Layout requests send app names, window titles, and your instructions to the chosen provider. Window images stay local. Fenlet only organizes windows; it does not scan or modify Desktop files. There are no background model calls. Private plans/journals live in `~/.local/state/fenlet`; settings live in `~/.config/fenlet`.
 
-Window thumbnails use ScreenCaptureKit on macOS 14+ and optional Screen Recording permission. Onboarding guides you through this permission; you can also enable it in Settings. Arrangement still works without it. Captures stay in widget memory, never go to the provider, and are never saved to disk. While the widget is open, window positions and images refresh about once a second. Closing it stops refreshes. These updates make no model calls and never scan Desktop files. A budget of 24 small images limits memory; inspecting a window prioritizes it. A desktop geometry change invalidates an old proposed layout. Captures never block the CLI or arrangement.
+Window thumbnails use ScreenCaptureKit on macOS 14+ and optional Screen Recording permission. Onboarding guides you through this permission; you can also enable it in Settings. Arrangement still works without it. Captures stay in widget memory, never go to the provider, and are never saved to disk. While the widget is open, the shared engine stays warm. Window positions refresh every 1–3 seconds and after app/display activity. Only visible tiles and the hovered window are captured. Closing it stops refreshes. These updates make no model calls and never scan Desktop files. A budget of 24 small images limits memory; inspecting a window prioritizes it. Desktop changes preserve draft choices that still match. Manually moved windows and newly opened windows stay in place. If the final check changes the draft, review and confirm it again. Captures never block the CLI or arrangement.
 
 Identical classification inputs reuse a private result for up to 60 seconds. Changes to titles, focus, process identities, instructions, display preferences or model invalidate it. Geometry and permission to act are checked fresh every time. Fenlet never enumerates Desktop files.
 
@@ -115,3 +117,5 @@ Short screens keep text panes at least 600 logical points tall when space allows
 Extra work windows go to the visible minimize tray in the draft, rather than
 forcing a short 2×2 grid. Tall displays can stack readable panes. The focused
 work window and its browser/terminal companion take priority over setup tools.
+
+Open a draft with **Control–Option–F**. **Return** confirms; **Escape** cancels. Model selection and latency live in Settings. Signed updates use Sparkle; choose **Check for updates…** in Settings. Fenlet waits for window operations to finish before an update relaunch.

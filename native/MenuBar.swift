@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import ApplicationServices
 import Combine
+import Carbon
 
 struct Bounds: Decodable, Equatable { let x, y, width, height: Double }
 struct PhysicalSize: Decodable, Equatable { let width, height: Double }
@@ -52,7 +53,8 @@ struct CoverageInfo: Decodable {
     struct ScanError: Decodable { let app: String }
     let errors: [ScanError]
 }
-struct ModelInfo: Decodable { let model: String; let latency_ms: Int }
+struct ModelInfo: Decodable { let model: String; let latency_ms: Int; var notice: String? = nil }
+struct RebaseInfo: Decodable { let inventory: InventoryInfo; let preview: PreviewInfo; let changed: Bool }
 struct PreviewInfo: Decodable {
     let plan_path: String
     let plan: PlanInfo
@@ -135,6 +137,8 @@ enum TidyError: LocalizedError {
     @Published var draftTarget: DraftTarget.Kind?
     @Published var liveInventory: InventoryInfo?
     @Published var liveReadOK = false
+    private var refreshing = false
+    private var quietRefreshes = 0
     private var liveTask: Task<Void, Never>?
     private var desktopRevision = 0
     @Published var presentation = LayoutPresentation.live(nil)
@@ -169,6 +173,7 @@ enum TidyError: LocalizedError {
         set { permissions = PermissionInfo(accessibility: newValue, screen_recording: permissions.screen_recording) }
     }
     @Published var keyConfigured = false
+    @Published var shortcutRegistered = false
     var workFocus = WorkFocus.capture(NSWorkspace.shared.frontmostApplication)
     let config = ProcessInfo.processInfo.environment["FENLET_CONFIG"].map { URL(fileURLWithPath: $0) }
         ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/fenlet/config.json")
@@ -184,34 +189,52 @@ enum TidyError: LocalizedError {
         liveTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                if !self.busy && !self.editingDraft && self.draggedWindowID == nil && !self.onboarding && !self.showingSettings {
-                    let revision = self.desktopRevision
-                    do {
-                        let data = try await Self.command(self.scanArguments, settings: self.settings, workFocus: self.workFocus)
-                        let response = try JSONDecoder().decode(Envelope<InventoryInfo>.self, from: data)
-                        if !Task.isCancelled, !self.busy, !self.editingDraft, revision == self.desktopRevision, response.ok, let inventory = response.data {
-                            self.observeInventory(inventory)
-                        } else if !Task.isCancelled { self.liveReadOK = false }
-                    } catch { if !Task.isCancelled { self.liveReadOK = false } }
-                } else if self.onboarding || self.showingSettings {
-                    await self.refreshPermission()
-                }
-                do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { return }
+                await self.refreshInventory()
+                do { try await Task.sleep(nanoseconds: self.quietRefreshes >= 3 ? 3_000_000_000 : 1_000_000_000) } catch { return }
             }
+        }
+    }
+    func refreshSoon() {
+        quietRefreshes = 0
+        guard liveTask != nil, !refreshing else { return }
+        Task { await refreshInventory() }
+    }
+    private func refreshInventory() async {
+        guard !refreshing else { return }
+        refreshing = true
+        defer { refreshing = false }
+        if !busy && !editingDraft && draggedWindowID == nil && !onboarding && !showingSettings {
+            let revision = desktopRevision
+            do {
+                let draft = hasLayout ? preview?.plan_path : nil
+                let data = try await Self.command(draft.map { ["rebase", $0, "--all-spaces"] } ?? scanArguments, settings: settings, workFocus: workFocus)
+                if draft != nil {
+                    let response = try JSONDecoder().decode(Envelope<RebaseInfo>.self, from: data)
+                    if liveTask != nil, !Task.isCancelled, !busy, !editingDraft, revision == desktopRevision, response.ok, let result = response.data {
+                        quietRefreshes = result.changed ? 0 : quietRefreshes + 1
+                        preview = result.preview; liveInventory = result.inventory; liveReadOK = true
+                        if result.changed { status = "Draft updated. Windows you moved yourself are left in place." }
+                        windowPreviews.refresh(result.inventory.windows, maxAge: 3)
+                    }
+                } else {
+                    let response = try JSONDecoder().decode(Envelope<InventoryInfo>.self, from: data)
+                    if liveTask != nil, !Task.isCancelled, !busy, !editingDraft, revision == desktopRevision, response.ok, let inventory = response.data { observeInventory(inventory) }
+                    else if !Task.isCancelled { liveReadOK = false }
+                }
+            } catch { if !Task.isCancelled { liveReadOK = false } }
+        } else if onboarding || showingSettings {
+            await refreshPermission()
         }
     }
     func stopPreviewUpdates() {
         liveTask?.cancel(); liveTask = nil; windowPreviews.pause(); windowPeek.hide()
-        liveReadOK = false
+        liveReadOK = false; Self.engine.stopWhenIdle()
         if CommandLine.arguments.contains("--diagnose") { fputs("live preview: stopped\n", stderr) }
     }
     func observeInventory(_ inventory: InventoryInfo) {
         let displaysChanged = liveInventory.map { $0.displays != inventory.displays } ?? false
         if displaysChanged { error = nil; status = "Display setup updated. Ready to arrange." }
-        if hasLayout, let planned = preview?.plan.inventory, !Self.sameLayout(planned, inventory) {
-            hasLayout = false
-            status = displaysChanged ? "Display setup updated. Ready to arrange." : "Windows changed. Arrange again when you’re ready."
-        }
+        quietRefreshes = liveInventory.map { Self.sameLayout($0, inventory) } == true ? quietRefreshes + 1 : 0
         liveReadOK = true; liveInventory = inventory
         windowPeek.update(inventory.windows, captures: windowPreviews)
         windowPreviews.refresh(inventory.windows, maxAge: 0.9)
@@ -294,46 +317,29 @@ enum TidyError: LocalizedError {
     func remember(_ path: String) {
         journal = path
     }
+    static let engine = Engine()
     static func command(_ args: [String], settings: Settings, input: String? = nil, workFocus: WorkFocus? = nil) async throws -> Data {
-        let root = Bundle.main.resourceURL!
-        return try await Task.detached {
-            let p = Process()
-            p.executableURL = root.appendingPathComponent("bin/fenlet")
-            var prefix = ["--json"]
-            if let file = settings.envFile, !file.isEmpty { prefix += ["--env-file", file] }
-            p.arguments = prefix + args
-            p.currentDirectoryURL = root
-            var env = ProcessInfo.processInfo.environment
-            env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:\(NSHomeDirectory())/.bun/bin:" + (env["PATH"] ?? "/usr/bin:/bin")
-            if let focus = workFocus {
-                env["FENLET_FRONTMOST_PID"] = String(focus.pid)
-                env["FENLET_FRONTMOST_WINDOW_ID"] = focus.windowID
-            }
-            p.environment = env
-            let pipe = Pipe()
-            p.standardOutput = pipe
-            // CLI reports domain errors as JSON; avoid an unread stderr pipe filling.
-            p.standardError = FileHandle.nullDevice
-            let stdinPipe = Pipe()
-            if input != nil { p.standardInput = stdinPipe }
-            try p.run()
-            if let input = input { stdinPipe.fileHandleForWriting.write(Data(input.utf8)); try? stdinPipe.fileHandleForWriting.close() }
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            p.waitUntilExit()
-            return data
-        }.value
+        try await engine.request(args, settings: settings, input: input, workFocus: workFocus)
     }
     func checkSetup() {
         Task {
             do {
+                let d = try await Self.command(["doctor", "--permissions-only"], settings: settings)
+                let e = try JSONDecoder().decode(Envelope<PermissionInfo>.self, from: d)
+                guard e.ok, let result = e.data else { throw TidyError.message(e.error ?? "Could not check setup.") }
+                _ = updatePermissions(result)
+                if !onboarding && liveTask != nil { scan(layout: false) }
+                if liveTask == nil { Self.engine.stopWhenIdle() }
+            } catch { self.error = error.localizedDescription; onboarding = true }
+        }
+    }
+    func checkProvider() {
+        Task {
+            do {
                 let d = try await Self.command(["doctor", "--provider", settings.provider], settings: settings)
                 let e = try JSONDecoder().decode(Envelope<DoctorInfo>.self, from: d)
-                guard e.ok, let result = e.data else { throw TidyError.message(e.error ?? "Could not check setup.") }
-                accessibility = result.accessibility; keyConfigured = result.key_configured
-                windowPreviews.refreshAuthorization()
-                onboarding = !accessibility || !previewsReady || !keyConfigured
-                if !onboarding { scan(layout: false) }
-            } catch { self.error = error.localizedDescription; onboarding = true }
+                if let result = e.data, e.ok { keyConfigured = result.key_configured }
+            } catch { self.error = error.localizedDescription }
         }
     }
     func refreshPermission() async {
@@ -351,7 +357,7 @@ enum TidyError: LocalizedError {
         permissions = result
         windowPreviews.refreshAuthorization()
         let wasOnboarding = onboarding
-        onboarding = !accessibility || !previewsReady || !keyConfigured
+        onboarding = !accessibility || !previewsReady
         return wasOnboarding && !onboarding
     }
     var previewRestartNeeded: Bool { permissions.screen_recording && !windowPreviews.allowed }
@@ -375,6 +381,7 @@ enum TidyError: LocalizedError {
         let d = try await Self.command(["setup", "--provider", settings.provider, "--key-stdin"], settings: settings, input: key)
         let e = try JSONDecoder().decode(Envelope<DoctorInfo>.self, from: d)
         guard e.ok else { throw TidyError.message(e.error ?? "Could not save the key.") }
+        keyConfigured = true
         checkSetup()
     }
     func scan(layout: Bool) {
@@ -403,12 +410,13 @@ enum TidyError: LocalizedError {
                 if liveTask != nil { windowPreviews.refresh(inventory.windows) }
                 status = layout ? (inventory.windows.contains { $0.fullscreen == true }
                     ? "Fullscreen windows will leave fullscreen when you confirm." : "Nothing moves or closes until you confirm.") : "Ready to arrange."
+                if layout, let notice = preview?.model?.notice { status = notice }
                 if layout, preview?.coverage.errors.isEmpty == false { status += " Some windows couldn't be inspected." }
             } catch { self.error = error.localizedDescription; status = "Arrange again when you’re ready." }
         }
     }
     func layoutArguments(_ command: String) -> [String] {
-        [command, layoutRequest, "--model", settings.model, "--provider", settings.provider, "--all-spaces"]
+        [command, layoutRequest, "--model", (settings.customInstructions ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "local" : "auto", "--preferred-model", settings.model, "--provider", settings.provider, "--all-spaces"]
     }
     func complete(_ result: ApplyInfo, from before: PreviewInfo, elapsed: Int) {
         presentation = .live(nil)
@@ -463,8 +471,16 @@ enum TidyError: LocalizedError {
         desktopRevision += 1
         busy = true; error = nil; status = "Arranging windows…"
         Task {
-            defer { busy = false; hasLayout = false }
+            defer { busy = false }
             do {
+                let checked = try await Self.command(["rebase", preview.plan_path, "--all-spaces"], settings: settings, workFocus: workFocus)
+                let refreshed = try JSONDecoder().decode(Envelope<RebaseInfo>.self, from: checked)
+                guard refreshed.ok, let current = refreshed.data else { throw TidyError.message(refreshed.error ?? "Could not check this draft.") }
+                if current.changed {
+                    self.preview = current.preview; liveInventory = current.inventory
+                    status = "Your desktop changed. Review the updated draft, then confirm."
+                    return
+                }
                 let data = try await Self.command(["apply", preview.plan_path, "--yes"], settings: settings)
                 let response = try JSONDecoder().decode(Envelope<ApplyInfo>.self, from: data)
                 guard response.ok, let result = response.data else { throw TidyError.message(response.error ?? "Could not apply this layout.") }
@@ -490,10 +506,24 @@ enum TidyError: LocalizedError {
     }
 }
 
+@MainActor enum AppIcons {
+    private static var cached: [String: NSImage]?
+    static func invalidate() { cached = nil }
+    static func image(_ name: String) -> NSImage? {
+        if cached == nil {
+            cached = [:]
+            for app in NSWorkspace.shared.runningApplications {
+                if let name = app.localizedName, let image = app.icon { cached?[name] = image }
+            }
+        }
+        return cached?[name]
+    }
+}
+
 struct AppGlyph: View {
     let name: String
     private var icon: NSImage? {
-        if let running = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == name })?.icon { return running }
+        if let image = AppIcons.image(name) { return image }
         #if FENLET_UI_TEST
         return DemoWindows.appIcon(name)
         #else
@@ -576,6 +606,8 @@ struct WindowTile: View {
             .shadow(color: .black.opacity(hovered ? 0.18 : 0.08), radius: hovered ? 4 : 2, y: 1)
             .overlay { CursorRegion(cursor: editable ? .openHand : .pointingHand).allowsHitTesting(false) }
         }.buttonStyle(.plain).onHover { hovered = $0; hoverChange($0) }
+            .onAppear { captures.watch(window) }
+            .onDisappear { captures.unwatch(window) }
             .accessibilityLabel("Preview " + window.app_name + ": " + window.title)
             .accessibilityHint(editable ? "Drag to swap panes, move to another display, or change its disposition. Right-click for placement choices." : "Inspect this window")
     }
@@ -720,9 +752,9 @@ struct Panel: View {
                 if store.hasDraft && !store.showingSettings {
                     Button { store.windowPeek.hide(); store.cancelPreview() } label: { Text("Cancel").frame(minWidth: 52, minHeight: 40).contentShape(Rectangle()) }
                         .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(.secondary).disabled(store.busy || store.editingDraft)
-                        .accessibilityLabel("Cancel preview")
+                        .accessibilityLabel("Cancel preview").keyboardShortcut(.cancelAction)
                 }
-                Button { store.windowPeek.hide(); store.showingSettings.toggle() } label: {
+                Button { store.windowPeek.hide(); store.showingSettings.toggle(); if store.showingSettings { store.checkProvider() } } label: {
                     Image(systemName: store.showingSettings ? "xmark" : "gearshape").frame(width: 40, height: 40).contentShape(Rectangle())
                 }.buttonStyle(.plain).foregroundStyle(.secondary).accessibilityLabel(store.showingSettings ? "Back to windows" : "Settings")
                     .disabled(store.busy || store.editingDraft)
@@ -753,20 +785,11 @@ struct Panel: View {
                         if store.busy || store.editingDraft { ProgressView().controlSize(.small).tint(.white) }
                         Text(store.busy ? (store.hasLayout ? "Arranging…" : "Preparing…") : store.editingDraft ? "Updating draft…" : store.hasLayout ? "Confirm arrangement" : "Arrange windows")
                     }
-                }.buttonStyle(TidyButtonStyle()).disabled(store.busy || store.editingDraft)
+                }.buttonStyle(TidyButtonStyle()).keyboardShortcut(.return, modifiers: []).disabled(store.busy || store.editingDraft)
                 Text(store.error ?? store.status).font(.system(size: 10))
                     .foregroundStyle(store.error == nil ? Color.secondary : .orange).lineLimit(2)
                     .frame(maxWidth: .infinity, minHeight: 24, maxHeight: 24, alignment: .topLeading)
                 HStack(spacing: 6) {
-                    Menu {
-                        ForEach(store.settings.provider == "gateway" ? ["jev", "hybrid", "nemotron", "beam"] : ["nemotron", "beam"], id: \.self) { model in
-                            Button(model == "jev" ? "Jev 1.14" : model == "hybrid" ? "Jev + Nemotron" : model.capitalized) {
-                                store.settings.model = model; store.hasLayout = false
-                                do { try store.persist() } catch { store.error = error.localizedDescription }
-                            }
-                        }
-                    } label: { Label(modelTitle, systemImage: "bolt.fill").frame(minHeight: 40).contentShape(Rectangle()) }.menuStyle(.borderlessButton).fixedSize().disabled(store.busy || store.editingDraft)
-                    if let ms = store.preview?.model?.latency_ms { Text(ms == 0 ? "Cached" : String(format: "%.2fs", Double(ms) / 1000)).foregroundStyle(.tertiary).monospacedDigit() }
                     Spacer()
                     Button { store.windowPeek.hide(); store.undo() } label: { Label("Undo", systemImage: "arrow.uturn.backward").frame(minWidth: 60, minHeight: 40).contentShape(Rectangle()) }
                         .buttonStyle(.plain).disabled(store.busy || store.editingDraft || store.journal == nil)
@@ -845,27 +868,38 @@ struct SettingsPanel: View {
     @State private var cliInstalled = false
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            if store.onboarding && (!store.accessibility || !store.previewsReady) {
-                PermissionSetup(store: store, captures: store.windowPreviews)
-            } else {
-            if store.onboarding {
-                Text("Connect your planner").font(.system(size: 20, weight: .semibold))
-                Text("Your Mac is ready. Add a key to plan your first layout.").font(.system(size: 12)).foregroundStyle(.secondary)
-            } else {
-                PermissionSetup(store: store, captures: store.windowPreviews)
-            }
+            PermissionSetup(store: store, captures: store.windowPreviews)
+            if !store.onboarding {
+            Text("AI assistance · optional").font(.system(size: 13, weight: .semibold))
             VStack(alignment: .leading, spacing: 10) {
                 Picker("Provider", selection: $store.settings.provider) {
                     Text("Vercel AI Gateway").tag("gateway")
                     Text("OpenRouter").tag("openrouter")
                 }
                 if store.keyConfigured { Label("Provider connected", systemImage: "checkmark.circle.fill").foregroundStyle(.green) }
-                SecureField(store.keyConfigured ? "Replace API key (optional)" : "API key", text: $apiKey)
+                SecureField(store.keyConfigured ? "Replace API key (optional)" : "API key (optional)", text: $apiKey)
                     .textFieldStyle(.roundedBorder)
                 Link("Get an API key ↗", destination: URL(string: store.settings.provider == "gateway" ? "https://vercel.com/ai-gateway" : "https://openrouter.ai/keys")!)
                     .font(.system(size: 11))
                 Text("Keys stay in Keychain. Layout requests send app names and window titles; file contents stay on your Mac.")
                     .font(.system(size: 10)).foregroundStyle(.secondary)
+            }
+            Picker("AI planner", selection: $store.settings.model) {
+                if store.settings.provider == "gateway" {
+                    Text("Jev · fast").tag("jev")
+                    Text("Jev + Nemotron").tag("hybrid")
+                }
+                Text("Nemotron").tag("nemotron")
+                Text("Beam").tag("beam")
+            }
+            Text("AI is optional. Without a key or connection, Fenlet prepares a safe local layout. Written instructions need AI; you can always drag tiles to customize.")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+            if let model = store.preview?.model { Text("Last planner: \(model.model) · \(model.latency_ms) ms").font(.system(size: 10)).foregroundStyle(.secondary) }
+            HStack {
+                Text(store.shortcutRegistered ? "⌃⌥F to open · Return to confirm · Escape to cancel" : "Return to confirm · Escape to cancel")
+                    .font(.system(size: 10)).foregroundStyle(.secondary)
+                Spacer()
+                Button("Check for updates…") { Updates.shared.check() }
             }
             HStack {
                 Label(cliInstalled ? "CLI & skill installed" : "Terminal & agents", systemImage: "terminal")
@@ -912,8 +946,13 @@ struct SettingsPanel: View {
     var previewWindow: NSWindow?
     private var sizeWatcher: AnyCancellable?
     private var focusObserver: NSObjectProtocol?
+    private var eventObservers: [NSObjectProtocol] = []
+    private var mouseObserver: Any?
+    private var hotKey: EventHotKeyRef?
+    private var hotKeyHandler: EventHandlerRef?
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        Updates.shared.start { [weak self] in self?.store.busy == true || self?.store.editingDraft == true }
         focusObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] event in
             MainActor.assumeIsolated {
                 if let focus = WorkFocus.capture(event.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication) { self?.store.workFocus = focus }
@@ -952,14 +991,35 @@ struct SettingsPanel: View {
                 window.setFrameOrigin(NSPoint(x: window.frame.minX, y: top - window.frame.height))
             }
         }
+        for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification,
+                     NSWorkspace.didHideApplicationNotification, NSWorkspace.didUnhideApplicationNotification] {
+            eventObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in MainActor.assumeIsolated { AppIcons.invalidate(); self?.store.refreshSoon() } })
+        }
+        eventObservers.append(NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in MainActor.assumeIsolated { self?.store.refreshSoon() } })
+        mouseObserver = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseUp) { [weak self] _ in self?.store.refreshSoon() }
+        var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        InstallEventHandler(GetApplicationEventTarget(), { _, _, context in
+            guard let context else { return OSStatus(eventNotHandledErr) }
+            MainActor.assumeIsolated { Unmanaged<AppDelegate>.fromOpaque(context).takeUnretainedValue().openFromShortcut() }
+            return noErr
+        }, 1, &eventType, Unmanaged.passUnretained(self).toOpaque(), &hotKeyHandler)
+        store.shortcutRegistered = RegisterEventHotKey(UInt32(kVK_ANSI_F), UInt32(controlKey | optionKey), EventHotKeyID(signature: 0x464e4c54, id: 1), GetApplicationEventTarget(), 0, &hotKey) == noErr
         // Launch and live updates only read. Arrange prepares a draft; Confirm applies it.
         store.checkSetup()
         if CommandLine.arguments.contains("--show") { DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { self.present() } }
+    }
+    func openFromShortcut() {
+        present()
+        if !store.hasLayout && !store.busy && !store.onboarding { store.scan(layout: true) }
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         present()
         return true
     }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        store.busy || store.editingDraft ? .terminateCancel : .terminateNow
+    }
+    func applicationWillTerminate(_ notification: Notification) { Store.engine.stopWhenIdle() }
     func popoverDidShow(_ notification: Notification) { store.startPreviewUpdates() }
     func popoverDidClose(_ notification: Notification) { store.stopPreviewUpdates() }
     func windowWillClose(_ notification: Notification) {
@@ -987,6 +1047,8 @@ struct SettingsPanel: View {
 @main struct Fenlet {
     @MainActor static func main() {
         let app = NSApplication.shared
+        signal(SIGPIPE, SIG_IGN)
+        guard SingleInstance.acquire() else { return }
         let delegate = AppDelegate()
         app.delegate = delegate
         withExtendedLifetime(delegate) { app.run() }

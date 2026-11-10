@@ -1,0 +1,12 @@
+{
+  "measurement": "read-only inventory wall milliseconds; same Mac, seven samples per mode, first worker request excluded",
+  "samples": 7,
+  "fresh_median_ms": 507.4,
+  "warm_median_ms": 216.8,
+  "warm_speedup": 2.34,
+  "warmup_ms": 539.5,
+  "window_count": 5,
+  "display_count": 2,
+  "inventory_complete": false,
+  "note": "OS and application dependent; partial inventory does not establish whole-desktop coverage. No window names or titles are included."
+}

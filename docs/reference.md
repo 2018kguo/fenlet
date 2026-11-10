@@ -53,3 +53,9 @@ describes why ordinary `AXWindows` enumeration misses other Spaces. Fenlet bound
 remote-element discovery per process and verifies the exact process, window ID,
 source Space, fullscreen state, destination Space and resulting rectangle.
 Missing discovery coverage is not evidence that a window was closed.
+
+`plan` and `arrange` use `--model auto`: configured AI with a four-second request timeout, falling back to safe local decisions. `--model local` never reads provider credentials or sends a request. Local planning does not close windows or interpret written instructions.
+
+`fenlet rebase PLAN_PATH --all-spaces` refreshes a draft while preserving reviewed choices and manual window moves. It returns `changed`, `inventory`, and `preview`; a changed preview needs another confirmation.
+
+`fenlet serve` accepts one JSON request per line on stdin and returns one response per line on stdout. A request has an increasing integer `id`, CLI `args`, optional `input` for setup, and optional `focus: {pid, window_id}`. Responses contain the same `id`, `ok`, and `data` or `error`. Duplicate IDs and unconfirmed writes are rejected. This private pipe is serial, has no network listener, and never retries a request.

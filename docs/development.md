@@ -10,8 +10,9 @@ reads and effects are in `native/Helper.swift`. The widget is in
 ```sh
 python3 -m unittest discover -v
 bash scripts/build-app.sh
-python3 scripts/verify-bundle.py build/Fenlet.app
+python3 scripts/verify-bundle.py build/development.noindex/Fenlet.app
 python3 scripts/benchmark-cpu.py
+python3 scripts/benchmark-session.py build/development.noindex/Fenlet.app/Contents/Resources/bin/fenlet
 ```
 
 `build-app.sh` obtains CPython 3.14.3 through uv and bundles it. The source
@@ -66,9 +67,9 @@ menu-bar popover once. Neither flag applies a layout.
 
    ```sh
    bash scripts/build-app.sh
-   python3 scripts/sign-app.py build/Fenlet.app --identity 'Developer ID Application: Your Name (TEAMID)'
-   python3 scripts/verify-bundle.py build/Fenlet.app
-   bash scripts/package.sh build/Fenlet.app
+   python3 scripts/sign-app.py build/development.noindex/Fenlet.app --identity 'Developer ID Application: Your Name (TEAMID)'
+   python3 scripts/verify-bundle.py build/development.noindex/Fenlet.app
+   bash scripts/package.sh build/development.noindex/Fenlet.app
    ```
 
 3. Create a local notarization profile once. Use an
@@ -84,10 +85,10 @@ menu-bar popover once. Neither flag applies a layout.
 
    ```sh
    xcrun notarytool submit build/Fenlet-macos-arm64.zip --keychain-profile PROFILE --wait
-   xcrun stapler staple build/Fenlet.app
-   xcrun stapler validate build/Fenlet.app
-   bash scripts/package.sh build/Fenlet.app
-   spctl --assess --type execute --verbose build/Fenlet.app
+   xcrun stapler staple build/development.noindex/Fenlet.app
+   xcrun stapler validate build/development.noindex/Fenlet.app
+   bash scripts/package.sh build/development.noindex/Fenlet.app
+   spctl --assess --type execute --verbose build/development.noindex/Fenlet.app
    ```
 
    A Developer ID signature alone is not notarization. State the actual
@@ -101,3 +102,9 @@ menu-bar popover once. Neither flag applies a layout.
 The bundle/Keychain identifier stays stable across the original local rename
 so existing installations retain their OS identity. Display geometry comes
 from OS-reported dimensions with a logical-point fallback.
+
+## App updates
+
+Sparkle 2.10.1 is downloaded with a pinned SHA-256 by `scripts/prepare-updater.sh`. Development apps live under `.noindex` to keep them out of app search. The main app holds a per-user instance lock.
+
+Release signing covers nested Sparkle bundles as well as the Python runtime. After notarizing, stapling, and packaging the final ZIP, run `python3 scripts/update-appcast.py build/Fenlet-macos-arm64.zip`. It signs and verifies the archive using the Fenlet Ed25519 key in Keychain and writes `docs/appcast.xml`. Never export or commit that private key. Upload the archive to a draft GitHub release, commit the appcast, then publish the release. Future releases must retain both the Developer ID and the Ed25519 public key. Check the public feed and download after publishing.

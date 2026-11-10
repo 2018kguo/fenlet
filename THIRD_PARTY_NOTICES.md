@@ -16,5 +16,10 @@ No Python packages are required by Fenlet. The runtime's existing package
 metadata and notices remain intact. Apple system frameworks and system app
 icons are supplied by macOS and are not redistributed as Fenlet assets.
 
+The app embeds [Sparkle 2.10.1](https://github.com/sparkle-project/Sparkle/releases/tag/2.10.1)
+for signed updates. Its MIT license and dependency notices are included at
+`Contents/Resources/Sparkle-LICENSE.txt`. The source archive is pinned to
+SHA-256 `1a856d2a9edb8e628de88121d7be04cf0e2167f8641650b78fca00b14244cf27`.
+
 The README demo uses synthetic window content. It contains no user desktop
 captures, private documents, credentials, or real conversations.

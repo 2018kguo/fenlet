@@ -56,7 +56,7 @@ class CLITest(unittest.TestCase):
                                {**inv, "windows": observed}, {}, {})
         output = io.StringIO()
         with tempfile.TemporaryDirectory() as directory, patch("fenlet.operations.STATE", Path(directory)), \
-             patch("sys.argv", ["fenlet", "arrange", "--yes"]), \
+             patch("sys.argv", ["fenlet", "arrange", "--model", "jev", "--yes"]), \
              patch("fenlet.__main__.inventory", return_value=inv), \
              patch("fenlet.__main__.decide", return_value=(decisions, {"model": "fixture", "latency_ms": 0})), \
              patch("fenlet.operations.native_window_batch", side_effect=effect) as native, redirect_stdout(output):

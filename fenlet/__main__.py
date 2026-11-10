@@ -6,7 +6,7 @@ import getpass
 import subprocess
 from . import __version__
 from .core import DEFAULT_INTENT, eligible_windows, snap_frame, screen_key, screen_for_window
-from .operations import apply, read_plan, save_plan, summary, undo, audit_layout, revise_plan
+from .operations import reconcile_plan, apply, read_plan, save_plan, summary, undo, audit_layout, revise_plan
 from .runtime import decide, inventory, load_env, doctor, save_provider_key, install_cli, install_skill, run_json, native, native_json
 
 
@@ -18,7 +18,7 @@ def resolve_display(inventory, selector):
     return screen
 
 
-def main():
+def arguments(argv=None):
     parser = argparse.ArgumentParser(prog="fenlet", description="Arrange your Mac windows into useful panes.")
     parser.add_argument("--version", action="version", version=f"fenlet {__version__}")
     parser.add_argument("--env-file", help="Explicit KEY=value file; never saved or uploaded")
@@ -38,7 +38,8 @@ def main():
         plan.add_argument("intent", nargs="?", default=DEFAULT_INTENT)
         plan.add_argument("--all-spaces", action="store_true", help="Include other Spaces; fullscreen windows leave fullscreen only on confirmation")
         plan.add_argument("--display", help="Gather all roles onto this display ID, or laptop")
-        plan.add_argument("--model", choices=["nemotron", "beam", "jev", "hybrid"], default="jev")
+        plan.add_argument("--model", choices=["auto", "local", "nemotron", "beam", "jev", "hybrid"], default="auto")
+        plan.add_argument("--preferred-model", choices=["jev", "hybrid", "nemotron", "beam"], default="jev", help=argparse.SUPPRESS)
         plan.add_argument("--provider", choices=["gateway", "openrouter"], default="gateway")
         for purpose in ("work", "chat", "reference"):
             plan.add_argument(f"--{purpose}-display", default="auto", help="Display ID from scan, or auto")
@@ -65,77 +66,101 @@ def main():
     setup.add_argument("--permissions", action="store_true", help="Open macOS Accessibility settings")
     setup.add_argument("--install-cli", action="store_true", help="Install ~/.local/bin/fenlet and add it to zsh PATH")
     setup.add_argument("--install-skill", action="store_true", help="Install the bundled agent skill for Codex")
-    args = parser.parse_args()
+    sub.add_parser("serve", help="Keep the shared engine warm using JSON requests on stdin")
+    rebase = sub.add_parser("rebase", help="Refresh a draft without discarding reviewed choices")
+    rebase.add_argument("plan_path")
+    rebase.add_argument("--all-spaces", action="store_true")
+    return parser.parse_args(argv)
+
+
+def execute(args, input_text=None):
     started = time.monotonic()
-    try:
-        if args.env_file and not (args.command == "doctor" and args.permissions_only):
-            load_env(args.env_file)
-        if args.command == "check":
-            result = audit_layout()
-        elif args.command in ("snap", "tile"):
-            inv = inventory(all_spaces=True) if args.command == "tile" and args.all_spaces else inventory()
-            destination = resolve_display(inv, args.display) if args.command == "tile" and args.display else None
-            windows = eligible_windows(inv)
-            if args.command == "tile":
-                decisions = [{"id": w["id"], "role": screen_key(destination or screen_for_window(w, inv["displays"]))} for w in windows]
-                path, p = save_plan(inv, decisions, "Tile visible windows.", None)
-                result = apply(path) if args.yes else summary(p, path)
-            else:
-                w = next((w for w in windows if w.get("is_focused")), None)
-                if not w:
-                    raise ValueError("Focus the window you want to snap, then run this command again.")
-                screen = screen_for_window(w, inv["displays"])
-                actions = [{"kind": "move", "window": w, "target": snap_frame(args.zone, screen["usable"]), "display": screen["id"], "display_name": screen["name"]}]
-                path, p = save_plan(inv, None, "Snap focused window.", None, actions=actions)
-                result = apply(path)
-        elif args.command == "doctor" and args.permissions_only:
-            result = native_json("permissions")
-        elif args.command in ("doctor", "setup"):
-            if args.command == "setup":
-                if args.key_stdin:
-                    save_provider_key(args.provider, sys.stdin.read().strip())
-                elif sys.stdin.isatty() and not args.permissions and not args.install_cli and not args.install_skill and not doctor(args.provider)["key_configured"]:
-                    save_provider_key(args.provider, getpass.getpass("Provider API key (saved in Keychain): "))
-                if args.permissions:
-                    subprocess.run(["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"], check=True)
-                if args.install_cli:
-                    install_cli()
-                if args.install_skill:
-                    install_skill()
-            result = doctor(args.provider)
-        elif args.command in ("scan", "plan", "arrange"):
-            inv = inventory(all_spaces=True) if args.all_spaces else inventory()
-            if args.command in ("plan", "arrange"):
-                destination = resolve_display(inv, args.display)["id"] if args.display else None
-                inv["display_preferences"] = {"work": destination or args.work_display, "chat": destination or args.chat_display, "references": destination or args.reference_display}
-            if args.command == "scan":
-                result = inv
-            else:
-                intent = args.intent
-                decisions, model = decide(inv, intent, args.model, args.provider, use_cache=True)
-                path, p = save_plan(inv, decisions, intent, model)
-                result = summary(p, path)
-                if args.command == "arrange":
-                    if not args.yes:
-                        counts = {kind: sum(a["kind"] == kind for a in p["actions"]) for kind in ("move", "minimize", "close")}
-                        if not sys.stdin.isatty() or input(f"{counts}. Apply this layout? Type apply: ") != "apply":
-                            raise ValueError(f"Nothing changed. Review {path}, then apply it or run arrange --yes when authorized.")
-                    result = {"preview": result, "result": apply(path), "elapsed_ms": round((time.monotonic() - started) * 1000)}
-        elif args.command == "edit":
-            if args.swap:
-                result = revise_plan(args.plan_path, "swap", *args.swap)
-            elif args.move:
-                result = revise_plan(args.plan_path, "move", *args.move)
-            else:
-                result = revise_plan(args.plan_path, "minimize" if args.minimize else "close", args.minimize or args.close)
-        elif args.command == "apply":
-            if not args.yes:
-                if not sys.stdin.isatty() or input("Apply this layout? Type apply: ") != "apply":
-                    raise ValueError("Nothing changed. Review the plan and confirm, or use --yes when authorized.")
-            result = apply(args.plan_path)
+    if (args.env_file and args.command in ("plan", "arrange", "setup", "doctor")
+        and not (args.command == "doctor" and args.permissions_only)
+        and not (args.command in ("plan", "arrange") and args.model == "local")):
+        load_env(args.env_file)
+    if args.command == "check":
+        result = audit_layout()
+    elif args.command in ("snap", "tile"):
+        inv = inventory(all_spaces=True) if args.command == "tile" and args.all_spaces else inventory()
+        destination = resolve_display(inv, args.display) if args.command == "tile" and args.display else None
+        windows = eligible_windows(inv)
+        if args.command == "tile":
+            decisions = [{"id": w["id"], "role": screen_key(destination or screen_for_window(w, inv["displays"]))} for w in windows]
+            path, p = save_plan(inv, decisions, "Tile visible windows.", None)
+            result = apply(path) if args.yes else summary(p, path)
         else:
-            result = undo(args.journal_path)
-        print(json.dumps({"ok": True, "data": result}, ensure_ascii=False))
+            w = next((w for w in windows if w.get("is_focused")), None)
+            if not w:
+                raise ValueError("Focus the window you want to snap, then run this command again.")
+            screen = screen_for_window(w, inv["displays"])
+            actions = [{"kind": "move", "window": w, "target": snap_frame(args.zone, screen["usable"]), "display": screen["id"], "display_name": screen["name"]}]
+            path, p = save_plan(inv, None, "Snap focused window.", None, actions=actions)
+            result = apply(path)
+    elif args.command == "doctor" and args.permissions_only:
+        result = native_json("permissions")
+    elif args.command in ("doctor", "setup"):
+        if args.command == "setup":
+            if args.key_stdin:
+                save_provider_key(args.provider, (sys.stdin.read() if input_text is None else input_text).strip())
+            elif sys.stdin.isatty() and not args.permissions and not args.install_cli and not args.install_skill and not doctor(args.provider)["key_configured"]:
+                save_provider_key(args.provider, getpass.getpass("Provider API key (saved in Keychain): "))
+            if args.permissions:
+                subprocess.run(["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"], check=True)
+            if args.install_cli:
+                install_cli()
+            if args.install_skill:
+                install_skill()
+        result = doctor(args.provider)
+    elif args.command in ("scan", "plan", "arrange"):
+        inv = inventory(all_spaces=True) if args.all_spaces else inventory()
+        if args.command in ("plan", "arrange"):
+            destination = resolve_display(inv, args.display)["id"] if args.display else None
+            inv["display_preferences"] = {"work": destination or args.work_display, "chat": destination or args.chat_display, "references": destination or args.reference_display}
+        if args.command == "scan":
+            result = inv
+        else:
+            intent = args.intent
+            if args.model in ("auto", "local"):
+                from .runtime import automatic_decisions
+                decisions, model = automatic_decisions(inv, intent, args.preferred_model, args.provider, local_only=args.model == "local")
+            else:
+                decisions, model = decide(inv, intent, args.model, args.provider, use_cache=True)
+            path, p = save_plan(inv, decisions, intent, model)
+            result = summary(p, path)
+            if args.command == "arrange":
+                if not args.yes:
+                    counts = {kind: sum(a["kind"] == kind for a in p["actions"]) for kind in ("move", "minimize", "close")}
+                    if not sys.stdin.isatty() or input(f"{counts}. Apply this layout? Type apply: ") != "apply":
+                        raise ValueError(f"Nothing changed. Review {path}, then apply it or run arrange --yes when authorized.")
+                result = {"preview": result, "result": apply(path), "elapsed_ms": round((time.monotonic() - started) * 1000)}
+    elif args.command == "rebase":
+        result = reconcile_plan(args.plan_path, inventory(all_spaces=args.all_spaces))
+    elif args.command == "edit":
+        if args.swap:
+            result = revise_plan(args.plan_path, "swap", *args.swap)
+        elif args.move:
+            result = revise_plan(args.plan_path, "move", *args.move)
+        else:
+            result = revise_plan(args.plan_path, "minimize" if args.minimize else "close", args.minimize or args.close)
+    elif args.command == "apply":
+        if not args.yes:
+            if not sys.stdin.isatty() or input("Apply this layout? Type apply: ") != "apply":
+                raise ValueError("Nothing changed. Review the plan and confirm, or use --yes when authorized.")
+        result = apply(args.plan_path)
+    else:
+        result = undo(args.journal_path)
+    return result
+
+
+def main(argv=None):
+    args = arguments(argv)
+    if args.command == "serve":
+        from .worker import serve
+        serve(sys.stdin, sys.stdout)
+        return
+    try:
+        print(json.dumps({"ok": True, "data": execute(args)}, ensure_ascii=False))
     except Exception as e:
         print(json.dumps({"ok": False, "error": str(e)}))
         sys.exit(1)

@@ -350,7 +350,7 @@ func batchWindows(_ request: BatchRequest) {
     let groups = Array(Dictionary(grouping: Array(actions.enumerated()), by: { $0.element.window.pid }).values)
     let voiceOver = NSWorkspace.shared.isVoiceOverEnabled
     let prepared = Date()
-    DispatchQueue.concurrentPerform(iterations: groups.count) { groupIndex in
+    let performGroup: (Int) -> Void = { groupIndex in
         let group = groups[groupIndex]
         let app = AXUIElementCreateApplication(group[0].element.window.pid)
         let adjusts = group.contains { item in
@@ -518,6 +518,14 @@ func batchWindows(_ request: BatchRequest) {
             }
             results.set(index, result)
         }
+    }
+    // Fullscreen transitions change the active Space for other apps. Interleaved
+    // transfers can land on that transient Space instead of their destination.
+    // Ordinary moves retain parallel per-app batches.
+    if actions.contains(where: { $0.window.fullscreen == true || $0.target_fullscreen == true }) {
+        for index in groups.indices { performGroup(index) }
+    } else {
+        DispatchQueue.concurrentPerform(iterations: groups.count, execute: performGroup)
     }
     let effectsFinished = Date()
     var ordered = results.ordered(actions.count)

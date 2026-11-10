@@ -78,6 +78,23 @@ import SwiftUI
     private var refreshedAt = Date.distantPast
     private var requestedIdentities: [String] = []
     private var priorityIDs: [String] = []
+    private var visible: [String: Int] = [:]
+    private var latestWindows: [WindowInfo] = []
+    private var active = false
+    private var visibilityTask: Task<Void, Never>?
+    func watch(_ window: WindowInfo) {
+        let key = Self.identity(window)
+        visible[key, default: 0] += 1
+        guard visibilityTask == nil else { return }
+        visibilityTask = Task {
+            await Task.yield(); visibilityTask = nil
+            if active { refresh(latestWindows) }
+        }
+    }
+    func unwatch(_ window: WindowInfo) {
+        let key = Self.identity(window)
+        if let count = visible[key] { if count <= 1 { visible.removeValue(forKey: key) } else { visible[key] = count - 1 } }
+    }
 
     #if FENLET_UI_TEST
     private var fixtureMode = false
@@ -109,6 +126,8 @@ import SwiftUI
         else { NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!) }
     }
     func pause() {
+        active = false
+        visibilityTask?.cancel(); visibilityTask = nil
         generation += 1; refreshTask?.cancel(); refreshTask = nil; loading = false
     }
     func prioritize(_ preferred: [WindowInfo], in windows: [WindowInfo]) {
@@ -119,21 +138,23 @@ import SwiftUI
         #if FENLET_UI_TEST
         if fixtureMode { return }
         #endif
+        active = true; latestWindows = windows
         allowed = CGPreflightScreenCaptureAccess()
         guard allowed, supported else {
             generation += 1; refreshTask?.cancel(); loading = false; thumbnails = [:]; return
         }
-        // At most 24 x 512 x 320 x 4 bytes (~15 MB), with three captures in flight.
+        // Visible tiles use 256 x 160; only the hovered window uses 512 x 320.
+        // At most 24 images, with three captures in flight.
         // This budget affects thumbnails only, never window arrangement.
         guard !loading else { return }
         let known = Dictionary(uniqueKeysWithValues: windows.map { ($0.id, $0) })
-        let ordered = priorityIDs.compactMap { known[$0] } + windows
+        let ordered = priorityIDs.compactMap { known[$0] } + windows.filter { visible[Self.identity($0)] != nil }
         var seen = Set<String>(), requested: [WindowInfo] = []
         for window in ordered where !window.minimized {
             if seen.insert(window.id).inserted { requested.append(window) }
             if requested.count == 24 { break }
         }
-        let identities = requested.map { Self.identity($0) + "/" + $0.title + "/\($0.bounds.width)x\($0.bounds.height)" }
+        let identities = requested.map { Self.identity($0) + "/" + $0.title + "/\($0.bounds.width)x\($0.bounds.height)/\(priorityIDs.contains($0.id))" }
         if identities == requestedIdentities && Date().timeIntervalSince(refreshedAt) < maxAge { return }
         requestedIdentities = identities
         generation += 1
@@ -157,15 +178,18 @@ import SwiftUI
                         for window in batch {
                             guard let number = UInt32(window.id.dropFirst(2)), let capture = available[number],
                                   capture.owningApplication?.processID == window.pid else { continue }
+                            let detailed = priorityIDs.contains(window.id)
                             group.addTask {
-                                guard !Task.isCancelled, let image = try? await Self.capture(capture) else { return nil }
+                                guard !Task.isCancelled, let image = try? await Self.capture(capture, detailed: detailed) else { return nil }
                                 return (window.id, Self.identity(window), image)
                             }
                         }
+                        var updates = thumbnails
                         for await result in group {
                             guard !Task.isCancelled, revision == generation, let (id, identity, image) = result else { continue }
-                            thumbnails[id] = Thumbnail(identity: identity, image: NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height)))
+                            updates[id] = Thumbnail(identity: identity, image: NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height)))
                         }
+                        if revision == generation { thumbnails = updates }
                     }
                 }
                 guard !Task.isCancelled, revision == generation else { return }
@@ -184,9 +208,9 @@ import SwiftUI
         }
     }
     @available(macOS 14.0, *)
-    private static func capture(_ window: SCWindow) async throws -> CGImage {
+    private static func capture(_ window: SCWindow, detailed: Bool) async throws -> CGImage {
         let configuration = SCStreamConfiguration()
-        let scale = min(1, 512 / max(1, window.frame.width), 320 / max(1, window.frame.height))
+        let scale = min(1, (detailed ? 512 : 256) / max(1, window.frame.width), (detailed ? 320 : 160) / max(1, window.frame.height))
         configuration.width = max(1, Int(window.frame.width * scale))
         configuration.height = max(1, Int(window.frame.height * scale))
         configuration.showsCursor = false

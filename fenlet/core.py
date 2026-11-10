@@ -85,6 +85,60 @@ def available_roles(inventory):
     return (*WINDOW_EFFECTS, *(screen_key(s) for s in inventory["displays"]))
 
 
+def local_decisions(inventory):
+    """A useful offline layout; closing a window requires AI or an explicit edit."""
+    displays = display_assignments(inventory)
+    result = []
+    for w in eligible_windows(inventory):
+        usage = window_usage(w)
+        purpose = "chat" if usage == "communication" else "references" if w["app_name"] in {"Notes", "Preview", "Books", "Dictionary"} else "work"
+        role = "minimize" if usage == "utility" and not w.get("is_focused") else screen_key(displays["work" if w.get("is_focused") else purpose])
+        result.append({"id": w["id"], "role": role})
+    return result
+
+
+def reconcile_actions(previous, current):
+    """Keep reviewed choices while respecting windows moved outside the draft."""
+    known = {w["id"]: w for w in eligible_windows(current)}
+    screens = {s["id"]: s for s in current["displays"]}
+    defaults = {d["id"]: d["role"] for d in local_decisions(current)}
+    kept, roles, order = [], {id: "unchanged" for id in known}, []
+    for action in previous["actions"]:
+        old = action["window"]; live = known.get(old["id"])
+        if not live or live["pid"] != old["pid"] or live.get("process_instance") != old.get("process_instance"):
+            continue
+        if not same_bounds(live["bounds"], old["bounds"], 2) or not same_space_state(live, old):
+            continue  # Manual takeover: leave this window where it was moved.
+        if action["kind"] in ("minimize", "close") and (live.get("is_focused") or action["kind"] == "close" and live.get("title") != old.get("title")):
+            continue
+        role = "display_" + action["display"] if action["kind"] == "move" and action["display"] in screens else defaults[live["id"]] if action["kind"] == "move" else action["kind"]
+        roles[live["id"]] = role
+        kept.append({**action, "window": live})
+        if action["kind"] == "move": order.append(live["id"])
+    fixed = [w for id, w in known.items() if roles[id] == "unchanged"]
+    valid = screens == {s["id"]: s for s in previous["inventory"]["displays"]}
+    targets = {}
+    for a in kept:
+        if a["kind"] != "move": continue
+        screen = screens.get(a["display"]); b = a["target"]
+        if screen is None:
+            valid = False; continue
+        u = screen["usable"]
+        valid &= (u["x"] <= b["x"] and u["y"] <= b["y"] and b["x"]+b["width"] <= u["x"]+u["width"]+1
+                  and b["y"]+b["height"] <= u["y"]+u["height"]+1
+                  and a.get("target_space") == (screen.get("gather_space") if current.get("all_spaces") else None))
+        targets.setdefault(a.get("target_space"), []).append(b)
+    obstacles = {}
+    for w in fixed:
+        for space in (w.get("space_ids") or list(targets)) if current.get("all_spaces") else [None]:
+            obstacles.setdefault(space, []).append(w["bounds"])
+    # Compare exact counts rather than materializing target/obstacle pairs.
+    for space, frames in targets.items():
+        stationary = obstacles.get(space, [])
+        valid &= analyze_overlaps(frames + stationary, 0).count == analyze_overlaps(stationary, 0).count
+    return kept if valid else build_actions(current, [{"id": id, "role": role} for id, role in roles.items()], layout_order=order)
+
+
 def screen_for_window(window, screens):
     b = window["bounds"]
     return max(screens, key=lambda s: max(0, min(b["x"] + b["width"], s["usable"]["x"] + s["usable"]["width"]) - max(b["x"], s["usable"]["x"])) * max(0, min(b["y"] + b["height"], s["usable"]["y"] + s["usable"]["height"]) - max(b["y"], s["usable"]["y"])))
@@ -388,7 +442,7 @@ def build_actions(inventory, decisions, layout_order=None):
         screen = screens_by_role[role]
         minimum = {axis: min(window_minimum(w)[axis] for w in group) for axis in ("width", "height")}
         fixed = [w["bounds"] for w in fixed_windows if not inventory.get("all_spaces")
-                 or screen.get("gather_space") in w.get("space_ids", [])]
+                 or not w.get("space_ids") or screen.get("gather_space") in w["space_ids"]]
         packed, overflow_windows = pack_regions(group, free_regions(screen["usable"], fixed, minimum), screen, order)
         if order is None:
             packed = preserve_fitting_placements(packed)
