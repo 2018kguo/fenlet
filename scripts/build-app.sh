@@ -48,4 +48,5 @@ with (Path(sys.argv[2]) / "Contents/Info.plist").open("wb") as output:
 PYPLIST
 test -x "$TASK_APP/Contents/MacOS/Fenlet"
 codesign --force --sign - "$TASK_APP"
+"$TASK_RUNTIME/bin/python3" -B "$TASK_ROOT/scripts/app_registration.py" --forget "$TASK_APP"
 printf '%s\n' "$TASK_APP"

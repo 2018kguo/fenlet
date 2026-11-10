@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Check a relocated app with an empty home and no external Python or API key."""
 import argparse
+from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
 import plistlib
 import subprocess
 import tempfile
+from app_registration import forget
 
 
 def main():
@@ -15,9 +17,10 @@ def main():
     args = parser.parse_args()
     source = args.app.resolve()
     subprocess.run(["codesign", "--verify", "--deep", "--strict", str(source)], check=True)
-    with tempfile.TemporaryDirectory(prefix="fenlet-bundle-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="fenlet-bundle-") as temporary, ExitStack() as registrations:
         directory = Path(temporary)
         app = directory / "Portable Fenlet.app"
+        registrations.callback(forget, app)
         subprocess.run(["cp", "-cR", str(source), str(app)], check=True)
         home = directory / "home"; home.mkdir()
         env = {"HOME": str(home), "PATH": "/usr/bin:/bin", "TMPDIR": str(directory), "FENLET_STATE": str(home / "state")}

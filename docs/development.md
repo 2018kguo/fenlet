@@ -111,4 +111,15 @@ from OS-reported dimensions with a logical-point fallback.
 
 Sparkle 2.10.1 is downloaded with a pinned SHA-256 by `scripts/prepare-updater.sh`. Development apps live under `.noindex` to keep them out of app search. The main app holds a per-user instance lock.
 
+Builds and portable-install checks unregister their temporary app paths from
+Launch Services, macOS's app lookup database. Installation registers only the
+installed copy and removes Fenlet's other cached paths. To refresh an existing
+install without opening it:
+
+```sh
+python3 scripts/app_registration.py --prefer /Applications/Fenlet.app
+```
+
+This changes no windows or files.
+
 Release signing covers nested Sparkle bundles as well as the Python runtime. After notarizing, stapling, and packaging the final ZIP, run `python3 scripts/update-appcast.py build/Fenlet-macos-arm64.zip`. It signs and verifies the archive using the Fenlet Ed25519 key in Keychain and writes `docs/appcast.xml`. Never export or commit that private key. Upload the archive to a draft GitHub release, commit the appcast, then publish the release. Future releases must retain both the Developer ID and the Ed25519 public key. Check the public feed and download after publishing.

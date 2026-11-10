@@ -6,6 +6,7 @@ import plistlib
 import os
 import subprocess
 import tempfile
+from app_registration import prefer_install
 
 
 def identity(app):
@@ -46,7 +47,7 @@ def install(source, destination):
             if previous.exists(): previous.rename(destination)
             raise
     subprocess.run([str(destination / "Contents/Resources/bin/fenlet"), "setup", "--install-cli", "--install-skill"], check=True, stdout=subprocess.DEVNULL)
-    subprocess.run(["/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister", "-f", str(destination)], check=True)
+    prefer_install(destination, temporary_paths=[source, candidate, previous])
     return destination
 
 
