@@ -29,6 +29,12 @@ keep the focused work window. Browser Close candidates are rechecked before
 any desktop mutation. Never quit an entire automation browser to remove blank
 windows, and never infer that a long-running process is abandoned.
 
+Review the keep and minimize lists before applying. A click into chat or a
+browser can change OS focus while the main terminal still hosts active work.
+For the default work layout, keep that terminal beside the current work browser
+and background helper terminals. Correct a draft with local `edit` commands
+instead of asking the model to recreate it.
+
 ```sh
 scripts/fenlet apply PLAN_PATH --yes
 scripts/fenlet check

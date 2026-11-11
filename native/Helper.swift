@@ -181,9 +181,13 @@ func readWindowIndex(_ w: WindowRef, extraIDs: Set<CGWindowID> = []) -> WindowIn
     var index: [CGWindowID: AXUIElement] = [:], complete = true
     for element in windows {
         var number: CGWindowID = 0
-        if _AXUIElementGetWindow(element, &number) == .success {
+        if _AXUIElementGetWindow(element, &number) == .success, number != 0 {
             if index[number] == nil { index[number] = element }
-        } else { complete = false }
+        } else if axValue(element, kAXRoleAttribute) as? String != kAXScrollAreaRole {
+            // Finder includes its desktop scroll area in AXWindows. It has no
+            // WindowServer ID and is not an unidentified application window.
+            complete = false
+        }
     }
     if !extraIDs.isSubset(of: Set(index.keys)) {
         // Apps often expose their main/focused window across Spaces even when
@@ -348,6 +352,7 @@ func batchWindows(_ request: BatchRequest) {
     let trackedIDs = Dictionary(grouping: actions.filter { $0.window.space_ids != nil }, by: { $0.window.pid })
         .mapValues { Set($0.compactMap { UInt32($0.window.id.dropFirst(2)) }) }
     let groups = Array(Dictionary(grouping: Array(actions.enumerated()), by: { $0.element.window.pid }).values)
+    let activeSpacesBefore = bridge.currentSpaces()
     let voiceOver = NSWorkspace.shared.isVoiceOverEnabled
     let prepared = Date()
     let performGroup: (Int) -> Void = { groupIndex in
@@ -361,6 +366,7 @@ func batchWindows(_ request: BatchRequest) {
         if enhanced && !voiceOver { AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString, kCFBooleanFalse) }
         defer { if enhanced && !voiceOver { AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue) } }
         var windowIndex: WindowIndex?
+        var currentDesktopIndex: WindowIndex?
         for (index, action) in group {
             let w = action.window
             guard processMatches(w) else {
@@ -378,6 +384,16 @@ func batchWindows(_ request: BatchRequest) {
             }
             if action.kind == "inspect", w.space_ids == nil, let current = initial, current.pid == w.pid, current.onscreen {
                 results.set(index, ["id": w.id, "ok": true, "bounds": frameDictionary(current.frame), "minimized": false]); continue
+            }
+            if ["inspect", "metadata"].contains(action.kind), let current = initial, !current.onscreen,
+               w.minimized != true, w.fullscreen == false, let spaces = w.space_ids,
+               spaces.allSatisfy({ destinations[$0] == 0 }),
+               !activeSpacesBefore.isDisjoint(with: spaces), bridge.spaces(UInt32(w.id.dropFirst(2)) ?? 0) == spaces,
+               NSRunningApplication(processIdentifier: w.pid)?.isHidden == false {
+                if currentDesktopIndex == nil { results.noteIndexLoad(); currentDesktopIndex = readWindowIndex(w) }
+                if case .absent = indexedWindow(w, in: currentDesktopIndex!) {
+                    results.set(index, ["id": w.id, "ok": true, "closed": true]); continue
+                }
             }
             if windowIndex == nil { results.noteIndexLoad(); windowIndex = readWindowIndex(w, extraIDs: trackedIDs[w.pid] ?? []) }
             let lookup = indexedWindow(w, in: windowIndex!)
@@ -555,6 +571,7 @@ func batchWindows(_ request: BatchRequest) {
         after = cgRecords(afterEntries)
     }
     var verificationIndices: [Int32: WindowIndex] = [:]
+    var currentDesktopVerificationIndices: [Int32: WindowIndex] = [:]
     let spaceTypes = bridge.types(), activeSpaces = bridge.currentSpaces()
     let closedIDs = Set(actions.filter { $0.kind == "close" }.compactMap { UInt32($0.window.id.dropFirst(2)) })
     for (index, action) in actions.enumerated() {
@@ -570,18 +587,32 @@ func batchWindows(_ request: BatchRequest) {
             ordered[index]["minimized"] = !current.onscreen
         }
         if action.kind == "close" {
-            if verificationIndices[action.window.pid] == nil {
+            let membership = bridge.spaces(number)
+            let sameDesktop = before[action.window.id]?.onscreen == true
+                && action.window.space_ids.map { !activeSpaces.isDisjoint(with: $0) && membership == $0 } == true
+            let scopeIsCurrentDesktop = sameDesktop && action.window.fullscreen != true && current?.onscreen != true
+                && NSRunningApplication(processIdentifier: action.window.pid)?.isHidden == false
+            let collection: WindowIndex
+            if scopeIsCurrentDesktop {
+                if currentDesktopVerificationIndices[action.window.pid] == nil {
+                    results.noteIndexLoad()
+                    currentDesktopVerificationIndices[action.window.pid] = readWindowIndex(action.window)
+                }
+                collection = currentDesktopVerificationIndices[action.window.pid]!
+            } else {
+                if verificationIndices[action.window.pid] == nil {
                 results.noteIndexLoad()
                 // Closed NSWindows may retain their Space entries. Discover
                 // other tracked windows, then use the scoped removal check
                 // below with the complete AX roster to distinguish minimization.
                 let liveIDs = (trackedIDs[action.window.pid] ?? []).subtracting(closedIDs).filter { bridge.spaces($0) != [] }
                 verificationIndices[action.window.pid] = readWindowIndex(action.window, extraIDs: Set(liveIDs))
+                }
+                collection = verificationIndices[action.window.pid]!
             }
-            let lookup = indexedWindow(action.window, in: verificationIndices[action.window.pid]!)
-            let membership = bridge.spaces(number)
-            let sameDesktop = before[action.window.id]?.onscreen == true
-                && action.window.space_ids.map { !activeSpaces.isDisjoint(with: $0) && membership == $0 } == true
+            // Retained CG IDs on this Desktop are not extra AX windows that must
+            // be rediscovered. Requiring them made completed Finder closes fail.
+            let lookup = indexedWindow(action.window, in: collection)
             // A retained closed NSWindow may keep its CG ID and Space. A
             // complete current-Desktop AX roster still distinguishes Close
             // from minimization, hiding the app, or moving to another Space.
@@ -676,6 +707,8 @@ func displays() -> [[String: Any]] {
 func inventoryData(entries: [[String: Any]], focus: [String: Any], allSpaces: Bool = false) -> [String: Any] {
     let bridge = SpaceBridge.shared, types = allSpaces ? SpaceBridge.shared.types() : [:]
     var indices: [Int32: WindowIndex] = [:]
+    var currentDesktopIndices: [Int32: WindowIndex] = [:]
+    let activeSpaces = allSpaces ? bridge.currentSpaces() : []
     var memberships: [UInt32: [UInt64]] = [:]
     if allSpaces {
         for entry in entries where (entry[kCGWindowLayer as String] as? NSNumber)?.intValue == 0 {
@@ -723,6 +756,10 @@ func inventoryData(entries: [[String: Any]], focus: [String: Any], allSpaces: Bo
             if app.isHidden { continue }
             if row["onscreen"] as? Bool != true {
                 let reference = try! JSONDecoder().decode(WindowRef.self, from: JSONSerialization.data(withJSONObject: row))
+                if !activeSpaces.isDisjoint(with: membership), membership.allSatisfy({ types[$0] == 0 }) {
+                    if currentDesktopIndices[pid] == nil { currentDesktopIndices[pid] = readWindowIndex(reference) }
+                    if case .absent = indexedWindow(reference, in: currentDesktopIndices[pid]!) { continue }
+                }
                 if indices[pid] == nil { indices[pid] = readWindowIndex(reference, extraIDs: Set((byOwner[pid] ?? []).compactMap { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value })) }
                 guard case let .found(element) = indexedWindow(reference, in: indices[pid]!),
                       let minimized = axValue(element, kAXMinimizedAttribute) as? NSNumber else {
