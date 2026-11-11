@@ -1,5 +1,6 @@
 """Desktop decisions. No GUI, network, or filesystem effects in this module."""
 import math
+from collections import Counter, defaultdict
 from .overlap import analyze_overlaps
 
 WINDOW_EFFECTS = ("close", "minimize", "unchanged")
@@ -18,6 +19,8 @@ def window_usage(window):
     title = window.get("title", "").casefold()
     if app in COMMUNICATION_APPS or app in BROWSER_APPS and (title.endswith((" - slack", " - discord")) or any(hint in title for hint in (" - slack - ", " | slack", "microsoft teams", " - discord"))):
         return "communication"
+    if app == "Granola" or app in TERMINAL_APPS and title.split()[:1] == ["caffeinate"]:
+        return "background"
     return "terminal" if app in TERMINAL_APPS else "browser" if app in BROWSER_APPS else "other"
 
 
@@ -85,14 +88,77 @@ def available_roles(inventory):
     return (*WINDOW_EFFECTS, *(screen_key(s) for s in inventory["displays"]))
 
 
+def browser_window_context(windows, report, port):
+    """Only homogeneous, count-matched bounds groups can prove empty windows.
+
+    CDP and WindowServer use different IDs. Coincident windows cannot be paired
+    individually. Useful tabs prevent Close; attached targets and count mismatches
+    protect the group from all changes. Raw URLs and target IDs stay in the probe.
+    """
+    native_groups, browser_groups = defaultdict(list), defaultdict(list)
+    def key(bounds):
+        return tuple(round(bounds[k]) for k in ("x", "y", "width", "height"))
+    for w in windows:
+        native_groups[key(w["bounds"])].append(w)
+    reports = report.get("windows", []) if isinstance(report, dict) and report.get("complete") is True else []
+    if not isinstance(reports, list) or len(reports) > 512: reports = []
+    for item in reports:
+        if not isinstance(item, dict): browser_groups.clear(); break
+        b = item.get("bounds", {})
+        if not isinstance(b, dict): browser_groups.clear(); break
+        rect = {k: b.get(v) for k, v in zip(("x", "y", "width", "height"), ("left", "top", "width", "height"))}
+        if not valid_bounds(rect) or b.get("windowState") != "normal": continue
+        browser_groups[key(rect)].append(item)
+    contexts = {}
+    for position, group in native_groups.items():
+        reports = browser_groups[position]
+        inactive = len(group) == len(reports) and all(type(r.get("empty")) is bool and r.get("attached") is False and type(r.get("tabs")) is int and r["tabs"] > 0 for r in reports)
+        empty = inactive and all(r["empty"] for r in reports)
+        for w in group:
+            contexts[w["id"]] = {"kind": "empty_unattached" if empty else "background_unattached" if inactive else "protected", "port": port}
+    return contexts
+
+
+def clutter_hints(inventory):
+    windows = eligible_windows(inventory)
+    folders = Counter(w.get("title", "") for w in windows if w["app_name"] == "Finder")
+    hints = {}
+    for w in windows:
+        if w.get("is_focused"): continue
+        title, usage = w.get("title", ""), window_usage(w)
+        if w.get("browser_context", {}).get("kind") == "empty_unattached":
+            hints[w["id"]] = {"effect": "close", "reason": "Every tab is empty and no automation client is attached."}
+        elif w.get("browser_context", {}).get("kind") == "background_unattached":
+            hints[w["id"]] = {"effect": "minimize", "reason": "Preserve useful browser tabs while no automation client is attached."}
+        elif w["app_name"] == "Finder" and title == "Desktop" and folders[title] > 1:
+            hints[w["id"]] = {"effect": "close", "reason": "Duplicate Desktop folder window."}
+        elif usage in ("background", "utility"):
+            hints[w["id"]] = {"effect": "minimize", "reason": "Keep this background tool running."}
+    return hints
+
+
+def guard_cleanup_decisions(inventory, decisions):
+    """A visible tab title cannot authorize closing every tab in its window."""
+    known = {w["id"]: w for w in eligible_windows(inventory)}
+    guarded = []
+    for d in decisions:
+        w = known.get(d["id"])
+        if w and d["role"] == "close" and (w["app_name"] in TERMINAL_APPS or window_usage(w) == "background" or
+            w["app_name"] in BROWSER_APPS and w.get("browser_context", {}).get("kind") != "empty_unattached"):
+            guarded.append({**d, "role": "minimize"})
+        else: guarded.append(d)
+    return guarded
+
+
 def local_decisions(inventory):
-    """A useful offline layout; closing a window requires AI or an explicit edit."""
+    """Offline roles with evidence-backed closes and useful background tools."""
     displays = display_assignments(inventory)
+    hints = clutter_hints(inventory)
     result = []
     for w in eligible_windows(inventory):
         usage = window_usage(w)
         purpose = "chat" if usage == "communication" else "references" if w["app_name"] in {"Notes", "Preview", "Books", "Dictionary"} else "work"
-        role = "minimize" if usage == "utility" and not w.get("is_focused") else screen_key(displays["work" if w.get("is_focused") else purpose])
+        role = hints[w["id"]]["effect"] if w["id"] in hints else screen_key(displays["work" if w.get("is_focused") else purpose])
         result.append({"id": w["id"], "role": role})
     return result
 
@@ -115,7 +181,8 @@ def reconcile_actions(previous, current):
         roles[live["id"]] = role
         kept.append({**action, "window": live})
         if action["kind"] == "move": order.append(live["id"])
-    fixed = [w for id, w in known.items() if roles[id] == "unchanged"]
+    fixed = [w for w in current["windows"] if w.get("protected") and not w.get("minimized") and not w.get("hidden")
+             or w["id"] in known and roles[w["id"]] == "unchanged"]
     valid = screens == {s["id"]: s for s in previous["inventory"]["displays"]}
     targets = {}
     for a in kept:
@@ -159,11 +226,12 @@ def validate_decisions(windows, decisions, roles):
 
 
 def model_state(inventory, intent):
+    hints = clutter_hints(inventory)
     return {"intent": intent, "all_spaces": inventory.get("all_spaces", False),
             "displays": [{k: s[k] for k in ("id", "name", "built_in", "usable")}
                          for s in inventory["displays"]],
             "windows": [{**{k: w.get(k) for k in ("id", "app_name", "title", "is_focused")},
-                         "application_kind": window_usage(w)}
+                         "application_kind": window_usage(w), "cleanup_hint": hints.get(w["id"])}
                         for w in eligible_windows(inventory)]}
 
 
@@ -426,7 +494,8 @@ def build_actions(inventory, decisions, layout_order=None):
     actions = []
     groups = {screen_key(s): [] for s in screens}
     screens_by_role = {screen_key(s): s for s in screens}
-    fixed_windows = [w for w in windows if roles[w["id"]] == "unchanged"]
+    fixed_windows = [w for w in inventory["windows"] if (w.get("protected") and not w.get("minimized") and not w.get("hidden"))
+                     or w["id"] in roles and roles[w["id"]] == "unchanged"]
     for w in windows:
         role = roles[w["id"]]
         if w["is_focused"] and role in ("close", "minimize"):
@@ -458,6 +527,10 @@ def build_actions(inventory, decisions, layout_order=None):
                             "display": screen["id"], "display_name": screen["name"],
                             **({"target_space": screen["gather_space"]} if gathering else {})})
     # Remove reviewed clutter before laying out the active windows.
+    hints = clutter_hints(inventory)
+    for action in actions:
+        hint = hints.get(action["window"]["id"])
+        if hint and action["kind"] == hint["effect"]: action.setdefault("reason", hint["reason"])
     return sorted(actions, key=lambda a: a["kind"] == "move")
 
 

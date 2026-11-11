@@ -67,7 +67,7 @@ struct DraftTileInteractions: ViewModifier {
     @State private var angle = 0.0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     func body(content: Content) -> some View {
-        if store.hasLayout {
+        if store.hasLayout && window.protected_reason == nil {
             content.rotationEffect(.degrees(reduceMotion ? 0 : angle))
                 .modifier(DraftTargetRegion(kind: .pane(window.id)))
                 .opacity(store.draggedWindowID == window.id ? 0.4 : 1)

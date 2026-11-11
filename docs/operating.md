@@ -119,3 +119,20 @@ forcing a short 2×2 grid. Tall displays can stack readable panes. The focused
 work window and its browser/terminal companion take priority over setup tools.
 
 Open a draft with **Control–Option–F**. **Return** confirms; **Escape** cancels. Model selection and latency live in Settings. Signed updates use Sparkle; choose **Check for updates…** in Settings. Fenlet waits for window operations to finish before an update relaunch.
+
+## Close clutter without losing background work
+
+Duplicate Desktop folder windows and confirmed empty browser windows can go
+to Close, including without an AI key. A visible “New Tab” title is not enough:
+Fenlet checks all tabs through the automation browser's existing local DevTools
+port. It never enables debugging, attaches to a page, creates a tab, or changes
+focus. Useful tabs are preserved by minimizing an unattached window. Attached clients,
+ambiguous windows, and unavailable metadata keep an automation window protected
+in its current place. Raw URLs and launch
+arguments stay out of provider requests and plans.
+
+Automation-browser changes are checked again when you confirm. If the browser
+became active, Fenlet stops before changing any windows. A marketing page can
+share a window with useful tabs, so unverified browser windows are kept or
+minimized. Keep-awake terminals such as `caffeinate` and meeting tools are
+minimized to preserve their running work.

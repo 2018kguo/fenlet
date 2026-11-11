@@ -26,6 +26,7 @@ struct WindowInfo: Decodable, Identifiable {
     let is_focused: Bool?
     var space_ids: [UInt64]? = nil
     var fullscreen: Bool? = nil
+    var protected_reason: String? = nil
 }
 struct ActionInfo: Decodable, Identifiable {
     let kind: String
@@ -609,7 +610,8 @@ struct WindowTile: View {
             .onAppear { captures.watch(window) }
             .onDisappear { captures.unwatch(window) }
             .accessibilityLabel("Preview " + window.app_name + ": " + window.title)
-            .accessibilityHint(editable ? "Drag to swap panes, move to another display, or change its disposition. Right-click for placement choices." : "Inspect this window")
+            .accessibilityHint(window.protected_reason ?? (editable ? "Drag to swap panes, move to another display, or change its disposition. Right-click for placement choices." : "Inspect this window"))
+            .help(window.protected_reason ?? window.title)
     }
 }
 
@@ -675,7 +677,7 @@ struct DisplayCard: View {
                 ZStack(alignment: .topLeading) {
                     Color(nsColor: .underPageBackgroundColor).opacity(0.6)
                     ForEach(panes) { pane in
-                        WindowTile(window: pane.window, compact: pane.frame.width * scale < 90, editable: proposed, captures: captures, inspect: { show(pane.window) }, hoverChange: { inside in
+                        WindowTile(window: pane.window, compact: pane.frame.width * scale < 90, editable: proposed && pane.window.protected_reason == nil, captures: captures, inspect: { show(pane.window) }, hoverChange: { inside in
                             if inside && store.draggedWindowID == nil { peek.schedule(pane.window, captures: captures, in: inventory.windows) } else { peek.hide() }
                         })
                             .modifier(DraftTileInteractions(store: store, window: pane.window))

@@ -764,9 +764,88 @@ func inventory(allSpaces: Bool = false) {
     output(["ok": true, "data": data])
 }
 
+// Read only: never attach to a page, activate a browser, or create a target.
+// Semaphore publication keeps the synchronous JSON pipe independent of AppKit.
+final class BrowserProbeReply: @unchecked Sendable {
+    let ready = DispatchSemaphore(value: 0)
+    var value: [String: Any] = ["complete": false, "windows": []]
+}
+
+struct BrowserWindowSummary {
+    let bounds: [String: Any]
+    var tabs = 0
+    var empty = true
+    var attached = false
+    var json: [String: Any] { ["bounds": bounds, "tabs": tabs, "empty": empty, "attached": attached] }
+}
+
+func browserContext(_ port: Int) {
+    let reply = BrowserProbeReply()
+    let task = Task {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 0.5
+        configuration.timeoutIntervalForResource = 1
+        configuration.httpShouldSetCookies = false
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel(); reply.ready.signal() }
+        do {
+            let (data, response) = try await session.data(from: URL(string: "http://127.0.0.1:\(port)/json/version")!)
+            guard (response as? HTTPURLResponse)?.statusCode == 200, data.count < 1_048_576,
+                  let version = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let address = version["webSocketDebuggerUrl"] as? String, let url = URL(string: address),
+                  url.scheme == "ws", ["127.0.0.1", "localhost"].contains(url.host ?? ""),
+                  url.port == port, url.path.hasPrefix("/devtools/browser/"), url.user == nil else { return }
+            let socket = session.webSocketTask(with: url); socket.resume()
+            defer { socket.cancel(with: .goingAway, reason: nil) }
+            var sequence = 0
+            func read(_ method: String, _ params: [String: Any] = [:]) async throws -> [String: Any] {
+                sequence += 1
+                let request = try JSONSerialization.data(withJSONObject: ["id": sequence, "method": method, "params": params])
+                try await socket.send(.string(String(decoding: request, as: UTF8.self)))
+                for _ in 0..<8 {
+                    let message = try await socket.receive()
+                    let bytes: Data
+                    switch message {
+                    case .data(let d): bytes = d
+                    case .string(let s): bytes = Data(s.utf8)
+                    @unknown default: throw CocoaError(.coderReadCorrupt)
+                    }
+                    guard bytes.count < 2_097_152, let object = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { throw CocoaError(.coderReadCorrupt) }
+                    if object["id"] as? Int == sequence, let result = object["result"] as? [String: Any] { return result }
+                }
+                throw CocoaError(.coderReadCorrupt)
+            }
+            let result = try await read("Target.getTargets")
+            guard let targets = result["targetInfos"] as? [[String: Any]], targets.count <= 512 else { return }
+            var windows: [Int: BrowserWindowSummary] = [:]
+            for target in targets where target["type"] as? String == "page" {
+                guard let id = target["targetId"] as? String, let url = target["url"] as? String,
+                      let attached = target["attached"] as? Bool else { return }
+                let window = try await read("Browser.getWindowForTarget", ["targetId": id])
+                guard let number = window["windowId"] as? Int, let bounds = window["bounds"] as? [String: Any] else { return }
+                var group = windows[number] ?? BrowserWindowSummary(bounds: bounds)
+                group.tabs += 1
+                group.empty = group.empty && ["about:blank", "chrome://newtab/", "chrome://new-tab-page/"].contains(url)
+                group.attached = group.attached || attached
+                windows[number] = group
+            }
+            reply.value = ["complete": true, "windows": windows.values.map(\.json)]
+        } catch {
+            let error = error as NSError
+            reply.value["error"] = "\(error.domain) \(error.code)"
+        }
+    }
+    if reply.ready.wait(timeout: .now() + 1.5) == .success { output(["ok": true, "data": reply.value]) }
+    else { task.cancel(); output(["ok": true, "data": ["complete": false, "windows": []]]) }
+}
+
 func nativeCommand(_ command: String, payload: Data? = nil) -> Bool {
     switch command {
     case "displays": output(displays())
+    case "browser-context":
+        if let payload, let value = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
+           let port = value["port"] as? Int, (1...65535).contains(port) { browserContext(port) }
+        else { output(["ok": false, "error": "Invalid local browser port."]) }
     case "inventory":
         let options = payload.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
         inventory(allSpaces: options?["all_spaces"] as? Bool ?? false)

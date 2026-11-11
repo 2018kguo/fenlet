@@ -16,6 +16,7 @@ from fenlet import __version__
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("archive", type=Path)
+    parser.add_argument("--description", default="Improvements to window arrangement, safety, and performance.")
     args = parser.parse_args()
     sparkle = subprocess.check_output(["bash", str(ROOT / "scripts/prepare-updater.sh")], text=True).strip()
     signature = subprocess.check_output([str(Path(sparkle) / "bin/sign_update"), "--account", "org.2018kguo.fenlet", "-p", str(args.archive)], text=True).strip()
@@ -31,7 +32,7 @@ def main():
     ET.SubElement(item, "pubDate").text = format_datetime(datetime.now(timezone.utc))
     for name, value in (("version", __version__), ("shortVersionString", __version__), ("minimumSystemVersion", "13.0"), ("hardwareRequirements", "arm64")):
         ET.SubElement(item, "{" + ns + "}" + name).text = value
-    ET.SubElement(item, "description").text = "Faster local planning, persistent engine, preserved draft edits, efficient previews, and keyboard controls."
+    ET.SubElement(item, "description").text = args.description
     ET.SubElement(item, "enclosure", {"url": f"https://github.com/2018kguo/fenlet/releases/download/v{__version__}/{args.archive.name}",
         "length": str(args.archive.stat().st_size), "type": "application/octet-stream", "{" + ns + "}edSignature": signature,
         "{" + ns + "}os": "macos"})

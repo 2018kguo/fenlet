@@ -9,7 +9,7 @@ import uuid
 from dataclasses import dataclass
 
 from .core import build_actions, same_bounds, same_space_state, valid_bounds, fits_tile, frames_overlap, eligible_windows, constrained_tiles, layout_report, revise_actions, reconcile_actions
-from .runtime import STATE, native_window_batch, private_dir, write_json, replace_private_json, native_json
+from .runtime import STATE, native_window_batch, private_dir, write_json, replace_private_json, native_json, verify_browser_actions
 from .overlap import analyze_overlaps
 
 
@@ -32,7 +32,7 @@ def read_plan(path):
         if a["kind"] not in ("move", "minimize", "close") or known.get(w["id"]) != w or w["id"] in seen:
             raise ValueError("Invalid or duplicate window action.")
         seen.add(w["id"])
-        if w.get("accessible") is False or w.get("minimized") or not w.get("process_instance"):
+        if w.get("accessible") is False or w.get("minimized") or w.get("protected") or not w.get("process_instance"):
             raise ValueError("Window has no stable, accessible identity.")
         if a["kind"] in ("close", "minimize") and w.get("is_focused"):
             raise ValueError("The focused window must be preserved.")
@@ -70,7 +70,7 @@ def reconcile_plan(path, inv):
         inv = {**inv, "windows": inv["windows"] + unresolved}
     def state(value):
         return ({s["id"]: s for s in value["displays"]}, {w["id"]: tuple(json.dumps(w.get(k), sort_keys=True) for k in
-            ("pid", "process_instance", "bounds", "minimized", "space_ids", "fullscreen", "is_focused")) for w in value["windows"]})
+            ("pid", "process_instance", "bounds", "minimized", "space_ids", "fullscreen", "is_focused", "protected", "browser_context")) for w in value["windows"]})
     close_changed = any(a["kind"] == "close" and a["window"]["id"] in live
         and live[a["window"]["id"]].get("title") != a["window"].get("title") for a in before["actions"])
     expired = not 0 <= time.time() - before["inventory"]["created_at"] <= 900
@@ -267,6 +267,7 @@ def apply(path):
         p = read_plan(path)
         if not 0 <= time.time() - p["inventory"]["created_at"] <= 900:
             raise ValueError("Preview expired after 15 minutes. Make a fresh preview.")
+        verify_browser_actions(p["actions"], p["inventory"].get("windows", []))
         log = private_dir(STATE / "runs") / f"{p['id']}-windows.jsonl"
         fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         items = p["actions"]

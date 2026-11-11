@@ -15,9 +15,19 @@ scripts/fenlet scan
 scripts/fenlet plan "Tile coding on the big screen; chat and references on my laptop. Minimize useful background windows and close idle clutter."
 ```
 
-Read the plan's `actions`, `model.notice`, and `coverage.errors`. Code owns geometry, screen bounds, minimum sizes, and all effects. Display choices follow the connected screens automatically; explicit display overrides belong to the CLI. One display shares panes, and three or more can receive separate work, chat and references. Reported physical dimensions favor 6–8 inch reading widths and portrait height; unknown dimensions fall back to logical points. `--model auto` uses configured AI with a four-second request timeout and falls back to safe local choices. Local planning never closes windows or interprets written instructions: explain the fallback and use local draft edits for explicit placements. `--model local` never reads provider credentials. Jev is the preferred AI model; `hybrid` escalates uncertainty to Nemotron. Explicit `jev`, `hybrid`, `nemotron`, and `beam` require credentials. Jev/hybrid use Gateway. Images stay local; AI requests send app names, titles, and instructions. Never search unrelated projects for credentials.
+Read the plan's `actions`, `model.notice`, and `coverage.errors`. Code owns geometry, screen bounds, minimum sizes, and all effects. Display choices follow the connected screens automatically; explicit display overrides belong to the CLI. One display shares panes, and three or more can receive separate work, chat and references. Reported physical dimensions favor 6–8 inch reading widths and portrait height; unknown dimensions fall back to logical points. `--model auto` uses configured AI with a four-second request timeout and falls back to local choices. Local planning can close verified empty browser windows and redundant Desktop folders; it cannot interpret written instructions. Explain a fallback and use local draft edits for explicit placements. `--model local` never reads provider credentials. Jev is the preferred AI model; `hybrid` escalates uncertainty to Nemotron. Explicit `jev`, `hybrid`, `nemotron`, and `beam` require credentials. Jev/hybrid use Gateway. Images stay local; AI requests send app names, titles, and instructions. Never search unrelated projects for credentials.
 
 An existing instruction to organize windows authorizes ordinary moves, minimizations, and closing clearly idle clutter. Use `scripts/fenlet arrange --yes` to classify and apply in one run, or inspect the separate plan when helpful. Do not ask again unnecessarily. For an exploratory request, show the concrete result before requesting permission to apply. Unsaved work and dialogs stay open. Normal closes are real closes and cannot always be undone; do not claim otherwise.
+
+"New Tab" can hide useful tabs. Fenlet checks automation-browser tabs through
+read-only local DevTools metadata, without attaching, opening, or focusing
+anything. Only fully empty, unattached windows can close automatically. Useful unattached windows can be minimized. Active
+and unverified automation windows remain fixed; their bounds are
+obstacles for the layout. A marketing-page title cannot authorize closing its
+other tabs. Background keep-awake terminals, meeting tools, and unused editors;
+keep the focused work window. Browser Close candidates are rechecked before
+any desktop mutation. Never quit an entire automation browser to remove blank
+windows, and never infer that a long-running process is abandoned.
 
 ```sh
 scripts/fenlet apply PLAN_PATH --yes

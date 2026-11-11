@@ -5,7 +5,7 @@ import time
 import getpass
 import subprocess
 from . import __version__
-from .core import DEFAULT_INTENT, eligible_windows, snap_frame, screen_key, screen_for_window
+from .core import DEFAULT_INTENT, eligible_windows, snap_frame, screen_key, screen_for_window, guard_cleanup_decisions
 from .operations import reconcile_plan, apply, read_plan, save_plan, summary, undo, audit_layout, revise_plan
 from .runtime import decide, inventory, load_env, doctor, save_provider_key, install_cli, install_skill, run_json, native, native_json
 
@@ -126,6 +126,7 @@ def execute(args, input_text=None):
                 decisions, model = automatic_decisions(inv, intent, args.preferred_model, args.provider, local_only=args.model == "local")
             else:
                 decisions, model = decide(inv, intent, args.model, args.provider, use_cache=True)
+            decisions = guard_cleanup_decisions(inv, decisions)
             path, p = save_plan(inv, decisions, intent, model)
             result = summary(p, path)
             if args.command == "arrange":

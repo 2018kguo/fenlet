@@ -54,7 +54,7 @@ remote-element discovery per process and verifies the exact process, window ID,
 source Space, fullscreen state, destination Space and resulting rectangle.
 Missing discovery coverage is not evidence that a window was closed.
 
-`plan` and `arrange` use `--model auto`: configured AI with a four-second request timeout, falling back to safe local decisions. `--model local` never reads provider credentials or sends a request. Local planning does not close windows or interpret written instructions.
+`plan` and `arrange` use `--model auto`: configured AI with a four-second request timeout, falling back to local decisions. `--model local` never reads provider credentials or sends an AI request. Local planning closes verified empty browser windows and redundant Desktop folders, but does not interpret written instructions. Browser inspection stays on localhost, never attaches to pages, and never opens or focuses a window. Unknown or useful automation windows stay in place. A browser Close is revalidated before apply.
 
 `fenlet rebase PLAN_PATH --all-spaces` refreshes a draft while preserving reviewed choices and manual window moves. It returns `changed`, `inventory`, and `preview`; a changed preview needs another confirmation.
 

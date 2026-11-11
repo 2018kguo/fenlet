@@ -10,6 +10,16 @@ Use synthetic data in public tests, benchmarks, and screenshots. Keep window tit
 
 Never repeat an uncertain desktop mutation. Observe its actual effect, journal the result, and verify Undo. Preserve the user's subsequent window changes and unrelated browser automation.
 
+A browser's visible title is not its whole window. Automatic browser Close
+requires a fresh, complete check that every tab is empty and unattached. Use
+only read-only local DevTools queries; never attach to pages, create targets,
+or activate windows for inspection. CDP and WindowServer IDs differ: ambiguous
+bounds groups are eligible only when their counts match and every member is
+empty and unattached. Useful unattached windows can be minimized; attached and
+unknown automation windows remain fixed obstacles. Recheck all automation
+browser actions immediately before apply.
+Keep-awake terminals and meeting tools belong in the background, not Close.
+
 Run `python3 -m unittest discover -v` and `bash scripts/build-app.sh` after changing the engine or widget. The native and widget verification harnesses open windows and may switch fullscreen Spaces: do not run them on the user's active desktop without an explicit request or approval for visible testing. Use headless checks by default. When visible testing is authorized, `python3 scripts/verify-native.py` owns disposable windows and never mutates other apps. For performance changes run `scripts/benchmark-cpu.py`; separate CPU, provider, native operations, and full CLI wall time. For a model change, rerun `scripts/benchmark.py` with explicit credentials and keep observed latency, provider-reported cost, and assignment quality separate. Only claim GUI behavior verified when it was actually exercised.
 
 The widget always prepares an editable draft before confirmation. Keep drag edits local and immutable via `fenlet edit`; no model or OS calls during editing. Every background/close window has a visible thumbnail in the draft and can be dragged back to a display. Only window preview regions scroll; instructions and confirmation stay visible for any display count. Edit-mode motion is a short, one-shot cue and respects Reduce Motion. Preserve occupants of already fitting slots when opening a fresh draft; reserve header space for grab handles so editing does not shift captions. Use reported physical dimensions for readable pane widths and fall back to logical points when they are unknown or estimated.

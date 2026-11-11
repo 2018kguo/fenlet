@@ -12,8 +12,9 @@ from dataclasses import dataclass
 import atexit
 import select
 import threading
+import re
 
-from .core import model_state, validate_decisions, available_roles, eligible_windows, same_bounds, same_space_state, local_decisions
+from .core import model_state, validate_decisions, available_roles, eligible_windows, same_bounds, same_space_state, local_decisions, browser_window_context
 from .questions import ESCALATE_BELOW_PROBABILITY, placements, jev_payload
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -233,6 +234,64 @@ def native():
     return str(binary)
 
 
+_browser_processes = {}
+
+
+def browser_processes(windows):
+    """Cache immutable launch flags by process start identity, never raw argv."""
+    processes = {(w["pid"], w["process_instance"]) for w in windows if w.get("bundle_id") == "com.google.Chrome"}
+    for stale in set(_browser_processes) - processes: _browser_processes.pop(stale)
+    missing = processes - _browser_processes.keys()
+    if missing:
+        try:
+            response = subprocess.run(["ps", "-ww", "-p", ",".join(str(pid) for pid, _ in sorted(missing)), "-o", "pid=,args="], capture_output=True, text=True, timeout=0.5)
+            parsed = {}
+            for line in response.stdout.splitlines():
+                pid, separator, args = line.strip().partition(" ")
+                if not separator or not pid.isdecimal(): continue
+                # ps does not preserve argv quoting. These bounded flag tokens
+                # only protect a process; no paths or raw arguments are retained.
+                controlled = re.search(r"(?:^|\s)--(?:enable-automation|remote-debugging-(?:port|pipe))(?:=|\s|$)", args) is not None
+                port = re.search(r"(?:^|\s)--remote-debugging-port=(\d+)(?:\s|$)", args)
+                parsed[int(pid)] = {"controlled": controlled, "port": int(port[1]) if port and 0 < int(port[1]) <= 65535 else None}
+            for identity in missing: _browser_processes[identity] = parsed.get(identity[0], {"controlled": True, "port": None})
+        except (OSError, subprocess.TimeoutExpired):
+            return {pid: {"controlled": True, "port": None} for pid, _ in processes}
+    return {pid: _browser_processes[(pid, identity)] for pid, identity in processes}
+
+
+def inspect_browser_context(windows):
+    processes = browser_processes(windows)
+    groups = {}
+    for w in windows:
+        if processes.get(w["pid"], {}).get("controlled"): groups.setdefault(w["pid"], []).append(w)
+    for pid, group in groups.items():
+        port = processes[pid]["port"]
+        try: report = native_json("browser-context", {"port": port}) if port else {}
+        except (OSError, RuntimeError, ValueError): report = {}
+        contexts = browser_window_context(group, report, port)
+        for w in group:
+            w["browser_context"] = contexts[w["id"]]
+            if contexts[w["id"]]["kind"] == "protected":
+                w["protected"] = True
+                w["protected_reason"] = "Automation browser: useful tabs, an attached client, or unverified state."
+
+
+def verify_browser_actions(actions, windows=None):
+    selected = [a for a in actions if a["window"].get("browser_context")]
+    if not selected: return
+    groups = {}
+    for a in selected:
+        w = a["window"]
+        groups.setdefault((w["pid"], w["process_instance"], w["browser_context"].get("port")), []).append(a)
+    for (pid, instance, port), group in groups.items():
+        report = native_json("browser-context", {"port": port}) if port else {}
+        snapshot = [w for w in windows if w["pid"] == pid and w["process_instance"] == instance] if windows is not None else [a["window"] for a in group]
+        contexts = browser_window_context(snapshot, report, port)
+        if any(contexts[a["window"]["id"]]["kind"] not in ({"empty_unattached"} if a["kind"] == "close" else {"empty_unattached", "background_unattached"}) for a in group):
+            raise ValueError("The automation browser changed or became active. Make a fresh preview; nothing was changed.")
+
+
 def inventory(*, all_spaces=False):
     start = time.monotonic()
     observed = native_json("inventory", {"all_spaces": True}) if all_spaces else native_json("inventory")
@@ -260,6 +319,7 @@ def inventory(*, all_spaces=False):
         if learned:
             # An observed smaller frame disproves an older learned clamp.
             w["min_size"] = {axis: min(learned[axis], w["bounds"][axis]) for axis in ("width", "height")}
+    inspect_browser_context(candidates)
     # Opening the popover should not make the user's underlying work lose priority.
     prior_pid = os.environ.get("FENLET_FRONTMOST_PID")
     prior_id = os.environ.get("FENLET_FRONTMOST_WINDOW_ID")
